@@ -1,0 +1,55 @@
+# CMake and build system artifacts
+/build/
+/build-*/
+/cmake-build-*/
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/CTestTestfile.cmake
+/Makefile
+/install_manifest.txt
+/compile_commands.json
+/Testing/
+/CTestCostData.txt
+/.ninja_deps
+/.ninja_log
+*.ninja
+
+# Compiled objects and binaries
+*.o
+*.obj
+*.lo
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+
+# Coverage and profiling artifacts
+*.gcda
+*.gcno
+*.gcov
+*.profraw
+*.profdata
+
+# Runtime logs and core dumps
+*.log
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Local environment files
+.env
+.env.*
+
+doc
+tests
