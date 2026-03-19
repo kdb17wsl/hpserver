@@ -11,6 +11,8 @@ target_include_directories(hpserver_headers INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/src/util
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/net/core
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/net/http
 )
 
 add_library(llhttp STATIC
@@ -26,6 +28,23 @@ target_include_directories(llhttp PUBLIC
 target_compile_features(llhttp PRIVATE c_std_99)
 
 target_link_libraries(hpserver_headers INTERFACE llhttp)
+
+add_executable(hpserver
+  src/main.cpp
+  src/hpserver.cpp
+  src/net/core/poller.cpp
+  src/net/core/socket_ops.cpp
+  src/net/http/http_conn.cpp
+  src/net/http/http_connection_io.cpp
+  src/net/http/http_request_parser.cpp
+  src/net/http/http_test_response.cpp
+)
+
+target_link_libraries(hpserver
+  PRIVATE
+    hpserver_headers
+)
+
 include(CTest)
 if(BUILD_TESTING)
     add_subdirectory(tests)
