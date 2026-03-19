@@ -81,10 +81,12 @@ int hpserver::listen() {
                     int client_fd =
                         server_socket.accept((struct sockaddr*)&client_addr, &client_len);
                     if (client_fd == -1) {
+                        if (errno == EINTR) {
+                            continue;
+                        }
                         if (errno == EAGAIN || errno == EWOULDBLOCK) {
                             break;
                         }
-                        perror("accept");
                         break;
                     }
 

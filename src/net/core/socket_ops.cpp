@@ -3,6 +3,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <cstdio>
 
 socket_ops::socket_ops(int domain, int type, int protocol) {
@@ -47,7 +48,7 @@ int socket_ops::listen(int backlog) const {
 
 int socket_ops::accept(struct sockaddr* addr, socklen_t* addrlen) const {
     int ret = ::accept(fd_, addr, addrlen);
-    if (ret == -1) {
+    if (ret == -1 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
         perror("accept");
     }
     return ret;
