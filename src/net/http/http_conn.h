@@ -25,6 +25,7 @@ public:
     ssize_t read_from_socket();
     ssize_t flush_to_socket();
     void queue_write(std::string_view data);
+    bool has_pending_write() const;
 
     bool parse_available_data();
     bool is_message_complete() const { return parser_.is_message_complete(); }

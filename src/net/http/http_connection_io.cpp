@@ -90,6 +90,10 @@ std::string http_connection_io::take_write_buffer() {
     return out;
 }
 
+bool http_connection_io::has_pending_write() const {
+    return write_offset_ < write_buffer_.size();
+}
+
 void http_connection_io::consume_read_bytes(std::size_t bytes) {
     if (bytes == 0) {
         return;

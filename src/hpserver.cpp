@@ -8,7 +8,7 @@
 #include <cstring>
 #include <iostream>
 
-#include "net/http/http_test_response.h"
+#include "net/proxy/http_proxy.h"
 
 namespace {
 constexpr std::uint32_t kClientEvents = EPOLLIN | EPOLLET | EPOLLRDHUP;
@@ -148,12 +148,10 @@ int hpserver::handle_client(int client_fd) {
     std::cout << "HTTP request complete: method=" << req.method << " url=" << req.url
               << " host=" << req.host << " port=" << req.port << std::endl;
 
-    conn.queue_write(build_test_echo_response(req));
-    if (conn.flush_to_socket() < 0) {
+    http_proxy proxy(conn);
+    if (!proxy.handle_request()) {
         return -1;
     }
 
-    // Keep parsing for the next keep-alive request. Forwarding will be added next.
-    conn.reset_for_next_message();
     return 0;
 }

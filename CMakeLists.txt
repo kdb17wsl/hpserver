@@ -38,6 +38,7 @@ add_executable(hpserver
   src/net/http/http_connection_io.cpp
   src/net/http/http_request_parser.cpp
   src/net/http/http_test_response.cpp
+  src/net/proxy/http_proxy.cpp
 )
 
 target_link_libraries(hpserver

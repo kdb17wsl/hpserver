@@ -18,6 +18,7 @@ public:
     void queue_write(std::string_view data);
     ssize_t flush_to_socket();
     std::string take_write_buffer();
+    bool has_pending_write() const;
 
     const std::string& read_buffer() const { return read_buffer_; }
     void consume_read_bytes(std::size_t bytes);

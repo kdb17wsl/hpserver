@@ -8,6 +8,8 @@ ssize_t http_conn::read_from_socket() {
 
 void http_conn::queue_write(std::string_view data) { io_.queue_write(data); }
 
+bool http_conn::has_pending_write() const { return io_.has_pending_write(); }
+
 ssize_t http_conn::flush_to_socket() { return io_.flush_to_socket(); }
 
 std::string http_conn::take_write_buffer() { return io_.take_write_buffer(); }
