@@ -188,36 +188,8 @@ int hpserver::finalize_connect_if_needed(proxy_session& session) {
         return -1;
     }
 
-    session.upstream_connected = true;
-    if (session.is_connect) {
-        session.state = session_state::kTunneling;
-        session.to_client.append("HTTP/1.1 200 Connection Established\r\n"
-                                 "Proxy-Agent: hpserver\r\n"
-                                 "\r\n");
-    } else {
-        session.state = session_state::kForwardingHttp;
-    }
+    proxy_session_manager::mark_upstream_connected(session);
     return 0;
-}
-
-void hpserver::maybe_shutdown_peer_after_read_close(proxy_session& session) {
-    if (session.client_read_closed && session.to_upstream.empty() && session.upstream_fd >= 0) {
-        ::shutdown(session.upstream_fd, SHUT_WR);
-    }
-    if (session.upstream_read_closed && session.to_client.empty() && session.client_fd >= 0) {
-        ::shutdown(session.client_fd, SHUT_WR);
-    }
-}
-
-bool hpserver::should_close_session(const proxy_session& session) const {
-    if (session.state == session_state::kForwardingHttp) {
-        return session.upstream_read_closed && session.to_client.empty();
-    }
-    if (session.state == session_state::kTunneling) {
-        return (session.client_read_closed || session.upstream_read_closed) &&
-               session.to_client.empty() && session.to_upstream.empty();
-    }
-    return false;
 }
 
 int hpserver::refresh_client_interest(int client_fd) {
@@ -358,7 +330,7 @@ int hpserver::start_proxy_session(int client_fd) {
 
     auto session = std::make_unique<proxy_session>();
     session->client_fd = client_fd;
-    session->state = session_state::kConnectingUpstream;
+    session->state = proxy_session_state::kConnectingUpstream;
     session->is_connect = req.is_connect;
 
     bool connected_immediately = false;
@@ -377,11 +349,7 @@ int hpserver::start_proxy_session(int client_fd) {
 
     if (req.is_connect) {
         if (connected_immediately) {
-            session->upstream_connected = true;
-            session->state = session_state::kTunneling;
-            session->to_client.append("HTTP/1.1 200 Connection Established\r\n"
-                                      "Proxy-Agent: hpserver\r\n"
-                                      "\r\n");
+            proxy_session_manager::mark_upstream_connected(*session);
         }
     } else {
         session->to_upstream = build_forward_request(req);
@@ -393,8 +361,7 @@ int hpserver::start_proxy_session(int client_fd) {
             return -1;
         }
         if (connected_immediately) {
-            session->upstream_connected = true;
-            session->state = session_state::kForwardingHttp;
+            proxy_session_manager::mark_upstream_connected(*session);
         }
     }
 
@@ -448,7 +415,7 @@ int hpserver::handle_client(int client_fd, std::uint32_t events_mask) {
         session.client_read_closed = true;
     }
 
-    if ((events_mask & EPOLLIN) != 0 && session.state == session_state::kTunneling) {
+    if ((events_mask & EPOLLIN) != 0 && session.state == proxy_session_state::kTunneling) {
         if (relay_engine::read_from_fd_into_buffer(session.client_fd, session.to_upstream,
                                                     session.client_read_closed) != 0) {
             return -1;
@@ -462,14 +429,14 @@ int hpserver::handle_client(int client_fd, std::uint32_t events_mask) {
         }
     }
 
-    maybe_shutdown_peer_after_read_close(session);
+    proxy_session_manager::maybe_shutdown_peer_after_read_close(session);
 
     if (refresh_client_interest(client_fd) != 0 ||
         refresh_upstream_interest(session.upstream_fd) != 0) {
         return -1;
     }
 
-    if (should_close_session(session)) {
+    if (proxy_session_manager::should_close_session(session)) {
         return -1;
     }
 
@@ -516,13 +483,13 @@ int hpserver::handle_upstream(int upstream_fd, std::uint32_t events_mask) {
         }
     }
 
-    maybe_shutdown_peer_after_read_close(session);
+    proxy_session_manager::maybe_shutdown_peer_after_read_close(session);
 
     if (refresh_client_interest(client_fd) != 0 || refresh_upstream_interest(upstream_fd) != 0) {
         return -1;
     }
 
-    if (should_close_session(session)) {
+    if (proxy_session_manager::should_close_session(session)) {
         return -1;
     }
 
