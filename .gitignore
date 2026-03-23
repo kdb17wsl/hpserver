@@ -51,6 +51,5 @@ Thumbs.db
 .env
 .env.*
 
-doc
-tests
+
 copilot*
