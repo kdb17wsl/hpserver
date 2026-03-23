@@ -9,8 +9,8 @@
 #include <vector>
 
 #include "http_conn.h"
+#include "net/proxy/proxy_event_dispatcher.h"
 #include "net/proxy/proxy_session_manager.h"
-#include "net/proxy/relay_engine.h"
 #include "net/proxy/upstream_connector.h"
 #include "poller.h"
 #include "socket_ops.h"
@@ -54,8 +54,6 @@ private:
     int handle_client(int client_fd, std::uint32_t events_mask);
     int handle_upstream(int upstream_fd, std::uint32_t events_mask);
     int start_proxy_session(int client_fd);
-
-    int finalize_connect_if_needed(proxy_session& session);
 
     int refresh_client_interest(int client_fd);
     int refresh_upstream_interest(int upstream_fd);
