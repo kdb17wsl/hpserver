@@ -14,7 +14,6 @@
 namespace {
 constexpr std::uint32_t kBaseClientEvents = EPOLLIN | EPOLLET | EPOLLRDHUP;
 constexpr std::uint32_t kBaseUpstreamEvents = EPOLLIN | EPOLLET | EPOLLRDHUP;
-constexpr std::size_t kRelayChunk = 8192;
 }
 
 bool hpserver::set_nonblocking(int fd) const {
@@ -199,72 +198,6 @@ int hpserver::finalize_connect_if_needed(proxy_session& session) {
         session.state = session_state::kForwardingHttp;
     }
     return 0;
-}
-
-int hpserver::flush_buffer_to_fd(int fd, std::string& buffer, std::size_t& offset) {
-    while (offset < buffer.size()) {
-        const ssize_t n = ::send(fd, buffer.data() + offset, buffer.size() - offset, 0);
-        if (n > 0) {
-            offset += static_cast<std::size_t>(n);
-            continue;
-        }
-
-        if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            return 0;
-        }
-        if (n == -1 && errno == EINTR) {
-            continue;
-        }
-        return -1;
-    }
-
-    buffer.clear();
-    offset = 0;
-    return 0;
-}
-
-int hpserver::read_client_into_upstream_buffer(proxy_session& session) {
-    char buf[kRelayChunk];
-    while (true) {
-        const ssize_t n = ::recv(session.client_fd, buf, sizeof(buf), 0);
-        if (n > 0) {
-            session.to_upstream.append(buf, static_cast<std::size_t>(n));
-            continue;
-        }
-        if (n == 0) {
-            session.client_read_closed = true;
-            return 0;
-        }
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return 0;
-        }
-        if (errno == EINTR) {
-            continue;
-        }
-        return -1;
-    }
-}
-
-int hpserver::read_upstream_into_client_buffer(proxy_session& session) {
-    char buf[kRelayChunk];
-    while (true) {
-        const ssize_t n = ::recv(session.upstream_fd, buf, sizeof(buf), 0);
-        if (n > 0) {
-            session.to_client.append(buf, static_cast<std::size_t>(n));
-            continue;
-        }
-        if (n == 0) {
-            session.upstream_read_closed = true;
-            return 0;
-        }
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return 0;
-        }
-        if (errno == EINTR) {
-            continue;
-        }
-        return -1;
-    }
 }
 
 void hpserver::maybe_shutdown_peer_after_read_close(proxy_session& session) {
@@ -516,13 +449,15 @@ int hpserver::handle_client(int client_fd, std::uint32_t events_mask) {
     }
 
     if ((events_mask & EPOLLIN) != 0 && session.state == session_state::kTunneling) {
-        if (read_client_into_upstream_buffer(session) != 0) {
+        if (relay_engine::read_from_fd_into_buffer(session.client_fd, session.to_upstream,
+                                                    session.client_read_closed) != 0) {
             return -1;
         }
     }
 
     if ((events_mask & EPOLLOUT) != 0 && !session.to_client.empty()) {
-        if (flush_buffer_to_fd(client_fd, session.to_client, session.to_client_offset) != 0) {
+        if (relay_engine::flush_buffer_to_fd(client_fd, session.to_client,
+                                             session.to_client_offset) != 0) {
             return -1;
         }
     }
@@ -568,13 +503,15 @@ int hpserver::handle_upstream(int upstream_fd, std::uint32_t events_mask) {
     }
 
     if (session.upstream_connected && (events_mask & EPOLLOUT) != 0 && !session.to_upstream.empty()) {
-        if (flush_buffer_to_fd(upstream_fd, session.to_upstream, session.to_upstream_offset) != 0) {
+        if (relay_engine::flush_buffer_to_fd(upstream_fd, session.to_upstream,
+                                             session.to_upstream_offset) != 0) {
             return -1;
         }
     }
 
     if (session.upstream_connected && (events_mask & EPOLLIN) != 0) {
-        if (read_upstream_into_client_buffer(session) != 0) {
+        if (relay_engine::read_from_fd_into_buffer(session.upstream_fd, session.to_client,
+                                                    session.upstream_read_closed) != 0) {
             return -1;
         }
     }
