@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "http_conn.h"
+#include "net/proxy/upstream_connector.h"
 #include "poller.h"
 #include "socket_ops.h"
 
@@ -75,8 +76,6 @@ private:
     int handle_upstream(int upstream_fd, std::uint32_t events_mask);
     int start_proxy_session(int client_fd);
 
-    int open_upstream_nonblocking(const std::string& host, std::uint16_t port,
-                                  int& upstream_fd, bool& connected_immediately) const;
     int finalize_connect_if_needed(proxy_session& session);
 
     int read_client_into_upstream_buffer(proxy_session& session);
