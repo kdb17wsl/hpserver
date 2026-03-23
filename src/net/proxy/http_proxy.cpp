@@ -12,6 +12,7 @@
 
 namespace {
 constexpr std::size_t kIoBufferSize = 8192;
+constexpr std::size_t kTunnelBufferLimit = 1 << 20;
 }
 
 bool http_proxy::wait_fd(int fd, short events) const {
@@ -111,6 +112,148 @@ bool http_proxy::send_all_nonblocking(int fd, const std::string& data) const {
 		return false;
 	}
 
+	return true;
+}
+
+bool http_proxy::flush_pending_nonblocking(int fd, std::string& buffer,
+										   std::size_t& offset) const {
+	while (offset < buffer.size()) {
+		ssize_t n = ::send(fd, buffer.data() + offset, buffer.size() - offset, 0);
+		if (n > 0) {
+			offset += static_cast<std::size_t>(n);
+			continue;
+		}
+
+		if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			return true;
+		}
+
+		return false;
+	}
+
+	buffer.clear();
+	offset = 0;
+	return true;
+}
+
+bool http_proxy::relay_tunnel_bidirectional(int upstream_fd) {
+	std::string client_to_upstream;
+	std::string upstream_to_client;
+	std::size_t c2u_offset = 0;
+	std::size_t u2c_offset = 0;
+	bool client_closed = false;
+	bool upstream_closed = false;
+
+	while (true) {
+		if ((client_closed || upstream_closed) && c2u_offset == client_to_upstream.size() &&
+			u2c_offset == upstream_to_client.size()) {
+			return true;
+		}
+
+		struct pollfd pfds[2];
+		pfds[0].fd = conn.fd();
+		pfds[0].events = 0;
+		pfds[0].revents = 0;
+		pfds[1].fd = upstream_fd;
+		pfds[1].events = 0;
+		pfds[1].revents = 0;
+
+		if (!client_closed && client_to_upstream.size() < kTunnelBufferLimit) {
+			pfds[0].events |= POLLIN;
+		}
+		if (!upstream_closed && upstream_to_client.size() < kTunnelBufferLimit) {
+			pfds[1].events |= POLLIN;
+		}
+		if (u2c_offset < upstream_to_client.size()) {
+			pfds[0].events |= POLLOUT;
+		}
+		if (c2u_offset < client_to_upstream.size()) {
+			pfds[1].events |= POLLOUT;
+		}
+
+		const int ret = ::poll(pfds, 2, kIoTimeoutMs);
+		if (ret == 0) {
+			errno = ETIMEDOUT;
+			return false;
+		}
+		if (ret < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			return false;
+		}
+
+		if ((pfds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+			client_closed = true;
+		}
+		if ((pfds[1].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+			upstream_closed = true;
+		}
+
+		if (!client_closed && (pfds[0].revents & POLLIN) != 0) {
+			char buf[kIoBufferSize];
+			ssize_t n = ::recv(conn.fd(), buf, sizeof(buf), 0);
+			if (n > 0) {
+				client_to_upstream.append(buf, static_cast<std::size_t>(n));
+				if (client_to_upstream.size() > kTunnelBufferLimit) {
+					errno = ENOBUFS;
+					return false;
+				}
+			} else if (n == 0) {
+				client_closed = true;
+			} else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+				return false;
+			}
+		}
+
+		if (!upstream_closed && (pfds[1].revents & POLLIN) != 0) {
+			char buf[kIoBufferSize];
+			ssize_t n = ::recv(upstream_fd, buf, sizeof(buf), 0);
+			if (n > 0) {
+				upstream_to_client.append(buf, static_cast<std::size_t>(n));
+				if (upstream_to_client.size() > kTunnelBufferLimit) {
+					errno = ENOBUFS;
+					return false;
+				}
+			} else if (n == 0) {
+				upstream_closed = true;
+			} else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+				return false;
+			}
+		}
+
+		if (c2u_offset < client_to_upstream.size() &&
+			!flush_pending_nonblocking(upstream_fd, client_to_upstream, c2u_offset)) {
+			return false;
+		}
+		if (u2c_offset < upstream_to_client.size() &&
+			!flush_pending_nonblocking(conn.fd(), upstream_to_client, u2c_offset)) {
+			return false;
+		}
+	}
+}
+
+bool http_proxy::handle_connect_tunnel(const std::string& host, std::uint16_t port) {
+	int upstream_fd = -1;
+	if (!connect_upstream(host, port, upstream_fd)) {
+		queue_error_response(502, "Bad Gateway", "Failed to connect upstream.");
+		return false;
+	}
+
+	const std::string response = "HTTP/1.1 200 Connection Established\r\n"
+								 "Proxy-Agent: hpserver\r\n"
+								 "\r\n";
+	bool ok = send_all_nonblocking(conn.fd(), response);
+	if (ok) {
+		ok = relay_tunnel_bidirectional(upstream_fd);
+	}
+
+	::close(upstream_fd);
+	if (!ok) {
+		return false;
+	}
+
+	conn.reset_for_next_message();
 	return true;
 }
 
@@ -287,8 +430,11 @@ void http_proxy::queue_error_response(int status, const char* reason, const char
 bool http_proxy::handle_request() {
 	const auto& req = conn.request();
 	if (req.is_connect) {
-		queue_error_response(501, "Not Implemented", "CONNECT is not implemented yet.");
-		return false;
+		if (req.host.empty() || req.port == 0) {
+			queue_error_response(400, "Bad Request", "Missing or invalid CONNECT target.");
+			return false;
+		}
+		return handle_connect_tunnel(req.host, req.port);
 	}
 
 	if (req.host.empty() || req.port == 0) {

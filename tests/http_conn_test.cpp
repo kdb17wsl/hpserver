@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
@@ -162,6 +163,39 @@ std::string read_http_message_with_timeout(int fd, int timeout_ms) {
     return out;
 }
 
+std::string read_until_contains_with_timeout(int fd, std::string_view token,
+                                             int timeout_ms) {
+    std::string out;
+    while (true) {
+        if (!token.empty() && out.find(token) != std::string::npos) {
+            break;
+        }
+
+        struct pollfd pfd {
+            fd, POLLIN, 0
+        };
+        const int poll_ret = ::poll(&pfd, 1, timeout_ms);
+        if (poll_ret <= 0) {
+            break;
+        }
+
+        char buf[4096];
+        const ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+        if (n > 0) {
+            out.append(buf, static_cast<std::size_t>(n));
+            continue;
+        }
+        if (n == 0) {
+            break;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+            continue;
+        }
+        break;
+    }
+    return out;
+}
+
 class LocalUpstreamServer {
 public:
     explicit LocalUpstreamServer(std::string response) : response_(std::move(response)) {
@@ -265,6 +299,101 @@ private:
     std::thread worker_;
     std::string response_;
     std::string received_request_;
+};
+
+class LocalTunnelUpstreamServer {
+public:
+    LocalTunnelUpstreamServer() {
+        listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (listen_fd_ == -1) {
+            throw std::runtime_error(std::strerror(errno));
+        }
+
+        int reuse = 1;
+        (void)::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+        sockaddr_in addr {};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;
+        if (::bind(listen_fd_, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0) {
+            const std::string err = std::strerror(errno);
+            ::close(listen_fd_);
+            listen_fd_ = -1;
+            throw std::runtime_error(err);
+        }
+
+        if (::listen(listen_fd_, 1) != 0) {
+            const std::string err = std::strerror(errno);
+            ::close(listen_fd_);
+            listen_fd_ = -1;
+            throw std::runtime_error(err);
+        }
+
+        sockaddr_in bound_addr {};
+        socklen_t bound_len = sizeof(bound_addr);
+        if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound_addr), &bound_len) != 0) {
+            const std::string err = std::strerror(errno);
+            ::close(listen_fd_);
+            listen_fd_ = -1;
+            throw std::runtime_error(err);
+        }
+        port_ = ntohs(bound_addr.sin_port);
+
+        worker_ = std::thread([this]() { this->serve_once(); });
+    }
+
+    ~LocalTunnelUpstreamServer() {
+        if (listen_fd_ != -1) {
+            ::close(listen_fd_);
+            listen_fd_ = -1;
+        }
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+    }
+
+    LocalTunnelUpstreamServer(const LocalTunnelUpstreamServer&) = delete;
+    LocalTunnelUpstreamServer& operator=(const LocalTunnelUpstreamServer&) = delete;
+
+    std::uint16_t port() const { return port_; }
+
+    std::string take_client_bytes() {
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+        return client_bytes_;
+    }
+
+private:
+    void serve_once() {
+        int conn_fd = -1;
+        while (true) {
+            conn_fd = ::accept(listen_fd_, nullptr, nullptr);
+            if (conn_fd >= 0) {
+                break;
+            }
+            if (errno == EINTR) {
+                continue;
+            }
+            return;
+        }
+
+        const std::string hello = "UP_HELLO";
+        (void)::send(conn_fd, hello.data(), hello.size(), 0);
+
+        client_bytes_ = read_until_contains_with_timeout(conn_fd, "PING", 2000);
+        const std::string reply = "UP_ECHO:" + client_bytes_;
+        (void)::send(conn_fd, reply.data(), reply.size(), 0);
+
+        ::shutdown(conn_fd, SHUT_WR);
+        ::close(conn_fd);
+    }
+
+    int listen_fd_ = -1;
+    std::uint16_t port_ = 0;
+    std::thread worker_;
+    std::string client_bytes_;
 };
 
 }  // namespace
@@ -505,4 +634,47 @@ TEST(HttpConnTest, ProxyForwardsPostBodyAndReturnsUpstreamResponse) {
     EXPECT_NE(forwarded.find("content-length: 7\r\n"), std::string::npos);
     EXPECT_EQ(forwarded.find("proxy-connection:"), std::string::npos);
     EXPECT_NE(forwarded.rfind("\r\n\r\na=1&b=2"), std::string::npos);
+}
+
+TEST(HttpConnTest, ProxyConnectEstablishesTunnelAndRelaysBidirectionalBytes) {
+    SocketPair sockets;
+    set_nonblocking_or_fail(sockets.server_fd());
+
+    LocalTunnelUpstreamServer upstream;
+    http_conn conn(sockets.server_fd());
+
+    const std::string request =
+        "CONNECT 127.0.0.1:" + std::to_string(upstream.port()) +
+        " HTTP/1.1\r\n"
+        "Host: ignored.example\r\n"
+        "\r\n";
+    write_all_or_fail(sockets.peer_fd(), request);
+
+    ASSERT_GT(conn.read_from_socket(), 0);
+    ASSERT_TRUE(conn.parse_available_data());
+    ASSERT_TRUE(conn.is_message_complete());
+    ASSERT_TRUE(conn.request().is_connect);
+
+    bool proxy_ok = false;
+    std::thread proxy_thread([&]() {
+        http_proxy proxy(conn);
+        proxy_ok = proxy.handle_request();
+    });
+
+    std::string client_read = read_until_contains_with_timeout(sockets.peer_fd(), "\r\n\r\n", 2000);
+    EXPECT_NE(client_read.find("HTTP/1.1 200 Connection Established\r\n"), std::string::npos);
+
+    write_all_or_fail(sockets.peer_fd(), "PING");
+
+    client_read += read_until_contains_with_timeout(sockets.peer_fd(), "UP_ECHO:PING", 2000);
+    EXPECT_NE(client_read.find("UP_HELLO"), std::string::npos);
+    EXPECT_NE(client_read.find("UP_ECHO:PING"), std::string::npos);
+
+    if (proxy_thread.joinable()) {
+        proxy_thread.join();
+    }
+    EXPECT_TRUE(proxy_ok);
+
+    const std::string tunnel_payload = upstream.take_client_bytes();
+    EXPECT_NE(tunnel_payload.find("PING"), std::string::npos);
 }

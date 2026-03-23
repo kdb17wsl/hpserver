@@ -201,30 +201,26 @@
 
 1. 2026-03-19：初版创建。
 2. 2026-03-23：阶段 A 首次落地，完成普通 HTTP 转发最小可用实现并通过编译与现有测试。
+3. 2026-03-23：阶段 B 最小实现完成，CONNECT 建连后返回 200 并支持双向字节流透传。
 
 ## 12. 阶段状态（最新）
 
-1. 目标阶段：A（普通 HTTP 转发最小可用）
+1. 目标阶段：B（CONNECT 隧道）
 2. 本次改动文件：
-	- src/hpserver.cpp
 	- src/net/proxy/http_proxy.h
 	- src/net/proxy/http_proxy.cpp
-	- src/net/http/http_conn.h
-	- src/net/http/http_conn.cpp
-	- src/net/http/http_connection_io.h
-	- src/net/http/http_connection_io.cpp
-	- CMakeLists.txt
+	- tests/http_conn_test.cpp
 3. 已完成项：
-	- hpserver 请求处理入口由测试回显切换为代理入口。
-	- 基于 host/port 发起非阻塞上游连接，处理 EINPROGRESS，并在可写后通过 SO_ERROR 确认连接结果。
-	- 普通 HTTP 请求转发时将绝对 URI 改写为 origin-form，并过滤 hop-by-hop 头。
-	- 上游响应按字节流回传客户端，处理客户端写方向 EAGAIN 背压。
+	- CONNECT 请求建立上游连接成功后返回 `200 Connection Established`。
+	- CONNECT 会话进入隧道模式后，双端按字节流双向非阻塞透传。
+	- 任一端关闭后触发会话收尾，避免隧道僵挂。
+	- 新增阶段 B 自动化回归用例，覆盖 CONNECT 建连与双向透传。
 4. 未完成项：
-	- CONNECT 隧道（阶段 B）。
 	- 双端 fd 统一纳入同一 epoll 事件循环（阶段 C）。
+	- CONNECT 升级后同包残留字节透传边界（阶段 D）。
 5. 验证结果：
 	- 已通过 `cmake --build build`。
-	- 已通过 `ctest --test-dir build --output-on-failure`（包含阶段 A 新增自动化回归：GET/POST 转发路径）。
+	- 已通过 `ctest --test-dir build --output-on-failure`（包含阶段 A 与阶段 B 新增自动化回归）。
 6. 风险与回滚点：
-	- 当前阶段 A 仍采用“单请求内主动搬运上游响应”的最小实现，后续阶段 C 将切换为双端 epoll 统一分派以改善并发行为。
-	- 若需快速回退，可仅回退 `src/hpserver.cpp` 中代理入口替换与 `src/net/proxy/http_proxy.*` 引入。
+	- 当前阶段 B 采用代理内 poll 驱动的最小隧道实现，后续阶段 C 将迁移到统一 epoll 双端分派。
+	- 若需快速回退，可回退 `src/net/proxy/http_proxy.*` 中 CONNECT 分支与隧道透传逻辑。

@@ -14,6 +14,9 @@ private:
     bool wait_fd(int fd, short events) const;
     bool connect_upstream(const std::string& host, std::uint16_t port, int& upstream_fd) const;
     bool send_all_nonblocking(int fd, const std::string& data) const;
+    bool flush_pending_nonblocking(int fd, std::string& buffer, std::size_t& offset) const;
+    bool relay_tunnel_bidirectional(int upstream_fd);
+    bool handle_connect_tunnel(const std::string& host, std::uint16_t port);
     bool relay_response_to_client(int upstream_fd);
     std::string build_forward_request() const;
     static std::string build_origin_form(const std::string& url);
