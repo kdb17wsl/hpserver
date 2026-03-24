@@ -7,7 +7,6 @@ add_executable(http_conn_test
     ../src/net/http/http_conn.cpp
     ../src/net/http/http_connection_io.cpp
     ../src/net/http/http_request_parser.cpp
-    ../src/net/http/http_test_response.cpp
     ../src/net/proxy/http_proxy.cpp
     ../src/net/core/socket_ops.cpp
 )

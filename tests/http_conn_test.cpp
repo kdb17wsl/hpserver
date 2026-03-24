@@ -17,7 +17,6 @@
 #include <thread>
 
 #include "src/net/http/http_conn.h"
-#include "src/net/http/http_test_response.h"
 #include "src/net/proxy/http_proxy.h"
 
 namespace {
@@ -392,32 +391,6 @@ TEST(HttpConnTest, ReportsParseErrorForInvalidRequest) {
     EXPECT_FALSE(conn.parse_available_data());
     EXPECT_TRUE(conn.has_parse_error());
     EXPECT_FALSE(conn.parse_error().empty());
-}
-
-TEST(HttpConnTest, BuildsEchoResponseFromRequestInfo) {
-    http_request_parser::request_info req;
-    req.method = "POST";
-    req.url = "/echo";
-    req.version = "1.1";
-    req.host = "example.org";
-    req.port = 8088;
-    req.content_length = 7;
-    req.keep_alive = true;
-    req.is_connect = false;
-
-    const std::string response = build_test_echo_response(req);
-
-    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos);
-    EXPECT_NE(response.find("Content-Type: text/plain; charset=utf-8\r\n"), std::string::npos);
-    EXPECT_NE(response.find("Connection: keep-alive\r\n"), std::string::npos);
-    EXPECT_NE(response.find("\r\n\r\nmethod=POST\n"), std::string::npos);
-    EXPECT_NE(response.find("url=/echo\n"), std::string::npos);
-    EXPECT_NE(response.find("version=1.1\n"), std::string::npos);
-    EXPECT_NE(response.find("host=example.org\n"), std::string::npos);
-    EXPECT_NE(response.find("port=8088\n"), std::string::npos);
-    EXPECT_NE(response.find("content_length=7\n"), std::string::npos);
-    EXPECT_NE(response.find("keep_alive=true\n"), std::string::npos);
-    EXPECT_NE(response.find("is_connect=false\n"), std::string::npos);
 }
 
 TEST(HttpConnTest, ProxyForwardsGetAsOriginFormAndFiltersHopHeaders) {
