@@ -448,12 +448,12 @@ TEST(HttpConnTest, ProxyForwardsGetAsOriginFormAndFiltersHopHeaders) {
     ASSERT_TRUE(conn.parse_available_data());
     ASSERT_TRUE(conn.is_message_complete());
 
-    http_proxy proxy(conn);
-    ASSERT_TRUE(proxy.handle_request());
-
-    const std::string response = read_http_message_with_timeout(sockets.peer_fd(), 2000);
-    EXPECT_NE(response.find("HTTP/1.1 200 OK\r\n"), std::string::npos);
-    EXPECT_NE(response.find("GET_OK"), std::string::npos);
+    std::string upstream_response;
+    int forward_errno = 0;
+    ASSERT_TRUE(http_proxy::forward_request(conn.request(), upstream_response, &forward_errno));
+    EXPECT_EQ(forward_errno, 0);
+    EXPECT_NE(upstream_response.find("HTTP/1.1 200 OK\r\n"), std::string::npos);
+    EXPECT_NE(upstream_response.find("GET_OK"), std::string::npos);
 
     const std::string forwarded = upstream.take_received_request();
     EXPECT_NE(forwarded.find("GET /hello?q=1 HTTP/1.1\r\n"), std::string::npos);
@@ -493,12 +493,12 @@ TEST(HttpConnTest, ProxyForwardsPostBodyAndReturnsUpstreamResponse) {
     ASSERT_TRUE(conn.parse_available_data());
     ASSERT_TRUE(conn.is_message_complete());
 
-    http_proxy proxy(conn);
-    ASSERT_TRUE(proxy.handle_request());
-
-    const std::string response = read_http_message_with_timeout(sockets.peer_fd(), 2000);
-    EXPECT_NE(response.find("HTTP/1.1 201 Created\r\n"), std::string::npos);
-    EXPECT_NE(response.find("POST_OK"), std::string::npos);
+    std::string upstream_response;
+    int forward_errno = 0;
+    ASSERT_TRUE(http_proxy::forward_request(conn.request(), upstream_response, &forward_errno));
+    EXPECT_EQ(forward_errno, 0);
+    EXPECT_NE(upstream_response.find("HTTP/1.1 201 Created\r\n"), std::string::npos);
+    EXPECT_NE(upstream_response.find("POST_OK"), std::string::npos);
 
     const std::string forwarded = upstream.take_received_request();
     EXPECT_NE(forwarded.find("POST /submit HTTP/1.1\r\n"), std::string::npos);
