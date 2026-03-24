@@ -22,5 +22,7 @@ private:
 
 public:
     explicit http_proxy(http_conn& conn) : conn(conn) {};
+    static bool forward_request(const http_conn::request_info& req,
+                                std::string& out_response, int* out_errno = nullptr);
     bool handle_request();
 };
