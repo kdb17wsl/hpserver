@@ -2,36 +2,49 @@
 
 #include <arpa/inet.h>
 #include <netdb.h>
-#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <cerrno>
 #include <cstring>
 
+#include "poller.h"
+
 namespace {
 constexpr std::size_t kIoBufferSize = 8192;
 }
 
-bool http_proxy::wait_fd(int fd, short events) {
-	struct pollfd pfd {
-		fd, events, 0
-	};
+bool http_proxy::wait_fd(int fd, std::uint32_t events) {
+	poller io_poller;
+	if (!io_poller.valid()) {
+		return false;
+	}
 
+	if (io_poller.add(fd, events) != 0) {
+		return false;
+	}
+
+	struct epoll_event ready_event {};
 	while (true) {
-		int ret = ::poll(&pfd, 1, kIoTimeoutMs);
+		const int ret = io_poller.wait(&ready_event, 1, kIoTimeoutMs);
 		if (ret > 0) {
-			return true;
+			break;
 		}
 		if (ret == 0) {
 			errno = ETIMEDOUT;
-			return false;
+			break;
 		}
 		if (errno == EINTR) {
 			continue;
 		}
-		return false;
+		break;
 	}
+
+	const int wait_errno = errno;
+	(void)io_poller.remove(fd);
+	errno = wait_errno;
+
+	return ready_event.events != 0;
 }
 
 bool http_proxy::connect_upstream(const std::string& host, std::uint16_t port,
@@ -63,7 +76,7 @@ bool http_proxy::connect_upstream(const std::string& host, std::uint16_t port,
 		}
 
 		if (ret == -1 && errno == EINPROGRESS) {
-			if (!wait_fd(fd, POLLOUT)) {
+			if (!wait_fd(fd, EPOLLOUT)) {
 				::close(fd);
 				continue;
 			}
@@ -137,7 +150,7 @@ bool http_proxy::forward_request(const http_conn::request_info& req,
 		}
 
 		if (errno == EAGAIN || errno == EWOULDBLOCK) {
-			if (!wait_fd(upstream_fd, POLLIN)) {
+			if (!wait_fd(upstream_fd, EPOLLIN)) {
 				ok = false;
 				break;
 			}
@@ -166,7 +179,7 @@ bool http_proxy::send_all_nonblocking(int fd, const std::string& data) {
 		}
 
 		if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-			if (!wait_fd(fd, POLLOUT)) {
+			if (!wait_fd(fd, EPOLLOUT)) {
 				return false;
 			}
 			continue;

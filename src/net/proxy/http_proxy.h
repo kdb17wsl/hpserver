@@ -9,7 +9,7 @@ class http_proxy {
 private:
     static constexpr int kIoTimeoutMs = 10000;
 
-    static bool wait_fd(int fd, short events);
+    static bool wait_fd(int fd, std::uint32_t events);
     static bool connect_upstream(const std::string& host, std::uint16_t port,
                                  int& upstream_fd);
     static bool send_all_nonblocking(int fd, const std::string& data);
