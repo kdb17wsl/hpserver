@@ -13,6 +13,7 @@
 
 namespace {
 constexpr std::uint32_t kClientEvents = EPOLLIN | EPOLLET | EPOLLRDHUP;
+constexpr int kClientIdleTimeoutMs = 15000;
 }
 
 hpserver::~hpserver() {
@@ -38,6 +39,8 @@ bool hpserver::set_nonblocking(int fd) const {
 }
 
 void hpserver::close_client(int client_fd) {
+    connection_timer_.remove(client_fd);
+
     if (client_fd >= 0 && static_cast<std::size_t>(client_fd) < proxy_inflight_.size()) {
         proxy_inflight_[client_fd] = false;
     }
@@ -46,6 +49,26 @@ void hpserver::close_client(int client_fd) {
     if (client_fd >= 0 && static_cast<std::size_t>(client_fd) < connections_.size()) {
         connections_[client_fd].reset();
     }
+}
+
+void hpserver::refresh_client_timeout(int client_fd) {
+    if (client_fd < 0 || client_fd >= MAX_FD ||
+        static_cast<std::size_t>(client_fd) >= connections_.size() || !connections_[client_fd]) {
+        return;
+    }
+
+    if (connection_timer_.contains(client_fd)) {
+        connection_timer_.adjust(client_fd, kClientIdleTimeoutMs);
+        return;
+    }
+
+    connection_timer_.add(client_fd, kClientIdleTimeoutMs, [this, client_fd]() {
+        if (client_fd < 0 || client_fd >= MAX_FD ||
+            static_cast<std::size_t>(client_fd) >= connections_.size() || !connections_[client_fd]) {
+            return;
+        }
+        close_client(client_fd);
+    });
 }
 
 void hpserver::init() {
@@ -125,7 +148,10 @@ void hpserver::drain_proxy_done_events() {
         connections_[client_fd]->queue_write(event.response);
         if (flush_client_output(client_fd) == -1) {
             close_client(client_fd);
+            continue;
         }
+
+        refresh_client_timeout(client_fd);
     }
 }
 
@@ -186,7 +212,8 @@ int hpserver::listen() {
     std::cout << "Server listening on port " << port << std::endl;
 
     while (true) {
-        int nfds = poller_.wait(events, MAX_EVENTS, -1);
+        const int timeout_ms = connection_timer_.get_next_timeout_ms();
+        int nfds = poller_.wait(events, MAX_EVENTS, timeout_ms);
         if (nfds == -1) {
             continue;
         }
@@ -219,6 +246,7 @@ int hpserver::listen() {
                     }
 
                     connections_[client_fd] = std::make_unique<http_conn>(client_fd);
+                    refresh_client_timeout(client_fd);
                 }
             } else if (events[i].data.fd == proxy_event_fd_) {
                 drain_proxy_done_events();
@@ -229,6 +257,10 @@ int hpserver::listen() {
                 if ((ev & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) != 0) {
                     close_client(client_fd);
                     continue;
+                }
+
+                if ((ev & (EPOLLIN | EPOLLOUT)) != 0) {
+                    refresh_client_timeout(client_fd);
                 }
 
                 if ((ev & EPOLLOUT) != 0) {
@@ -245,6 +277,8 @@ int hpserver::listen() {
                 }
             }
         }
+
+        connection_timer_.tick();
     }
 
     return 0;

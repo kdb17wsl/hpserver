@@ -9,6 +9,7 @@
 #include "http_conn.h"
 #include "poller.h"
 #include "socket_ops.h"
+#include "timer.h"
 #include "thread_pool.h"
 #include "threadsafe_queue.h"
 
@@ -43,6 +44,7 @@ private:
     threadsafe_queue<proxy_done_event> proxy_done_queue_;
     std::vector<bool> proxy_inflight_;
     int proxy_event_fd_ = -1;
+    timer connection_timer_;
 
     void init();
     bool set_nonblocking(int fd) const;
@@ -52,4 +54,5 @@ private:
     bool init_proxy_async();
     void submit_proxy_job(int client_fd, http_conn::request_info req);
     void drain_proxy_done_events();
+    void refresh_client_timeout(int client_fd);
 };
