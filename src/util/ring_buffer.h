@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <vector>
 
@@ -73,9 +74,15 @@ private:
     const size_t capacity_;
     std::vector<T> data_;
 
-    alignas(64) std::atomic<size_t> head_;
-    alignas(64) std::mutex head_mutex_;
+#ifdef __cpp_lib_atomic_wait
+    static constexpr size_t cache_line_size = std::hardware_destructive_interference_size;
+#else
+    static constexpr size_t cache_line_size = 64;
+#endif
 
-    alignas(64) std::atomic<size_t> tail_;
-    alignas(64) std::mutex tail_mutex_;
+    alignas(cache_line_size) std::atomic_size_t head_;
+    alignas(cache_line_size) std::atomic_size_t tail_;
+
+    std::mutex head_mutex_;
+    std::mutex tail_mutex_;
 };

@@ -6,6 +6,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -162,9 +163,15 @@ private:
 
     const unsigned int thread_count;
 
-    std::atomic_int waiting_thread_count;
-    std::atomic_bool is_stopped;
-    std::atomic_bool is_done;
+#ifdef __cpp_lib_atomic_wait
+    static constexpr size_t cache_line_size = std::hardware_destructive_interference_size;
+#else
+    static constexpr size_t cache_line_size = 64;
+#endif
+
+    alignas(cache_line_size) std::atomic_int waiting_thread_count;
+    alignas(cache_line_size) std::atomic_bool is_stopped;
+    alignas(cache_line_size) std::atomic_bool is_done;
 
     std::mutex mtx;
     std::condition_variable cv;
