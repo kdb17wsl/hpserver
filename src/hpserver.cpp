@@ -1,5 +1,6 @@
 #include "hpserver.h"
 
+#include <arpa/inet.h>
 #include <fcntl.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
@@ -39,6 +40,7 @@ bool hpserver::set_nonblocking(int fd) const {
 }
 
 void hpserver::close_client(int client_fd) {
+    LOG_INFO("Closing client connection on fd {}", client_fd);
     connection_timer_.remove(client_fd);
 
     if (client_fd >= 0 && static_cast<std::size_t>(client_fd) < proxy_inflight_.size()) {
@@ -102,17 +104,26 @@ bool hpserver::init_proxy_async() {
 }
 
 void hpserver::submit_proxy_job(int client_fd, http_conn::request_info req) {
+    LOG_DEBUG("Submitting proxy job for client fd {}, target={}:{}", client_fd, req.host, req.port);
     proxy_pool_.push([this, client_fd, req = std::move(req)]() mutable {
         proxy_done_event event;
         event.client_fd = client_fd;
         if (req.is_connect) {
+            LOG_DEBUG("Starting CONNECT tunnel for client fd {}", client_fd);
             event.close_after_done = true;
             event.ok = http_proxy::forward_connect_tunnel(client_fd, req, &event.err);
         } else {
+            LOG_DEBUG("Forwarding HTTP request for client fd {} to {}:{}", client_fd, req.host, req.port);
             event.ok = http_proxy::forward_request(req, event.response, &event.err);
         }
         if (!event.ok && event.err == 0) {
             event.err = EIO;
+        }
+
+        if (!event.ok) {
+            LOG_ERROR("Proxy operation failed for fd {}: {}", client_fd, strerror(event.err));
+        } else {
+            LOG_DEBUG("Proxy job completed for fd {}", client_fd);
         }
 
         proxy_done_queue_.push(std::move(event));
@@ -247,19 +258,24 @@ int hpserver::listen() {
                     }
 
                     if (!set_nonblocking(client_fd) || poller_.add(client_fd, kClientEvents)) {
+                        LOG_ERROR("Failed to setup new client connection on fd {}", client_fd);
                         ::close(client_fd);
                         continue;
                     }
 
                     if (client_fd < 0 || client_fd >= MAX_FD) {
+                        LOG_ERROR("Client fd {} exceeds MAX_FD", client_fd);
                         ::close(client_fd);
                         continue;
                     }
 
+                    LOG_INFO("New connection accepted: fd={} from {}:{}", client_fd, 
+                             inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
                     connections_[client_fd] = std::make_unique<http_conn>(client_fd);
                     refresh_client_timeout(client_fd);
                 }
             } else if (events[i].data.fd == proxy_event_fd_) {
+                LOG_DEBUG("Waking up to drain proxy done events");
                 drain_proxy_done_events();
             } else {
                 const int client_fd = events[i].data.fd;

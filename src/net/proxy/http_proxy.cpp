@@ -363,11 +363,13 @@ std::string http_proxy::build_forward_request(const http_conn::request_info& req
 
 bool http_proxy::forward_connect_tunnel(int client_fd, const http_conn::request_info& req,
 									int* out_errno) {
+	LOG_INFO("Establishing CONNECT tunnel for {}:{} on client fd {}", req.host, req.port, client_fd);
 	if (out_errno != nullptr) {
 		*out_errno = 0;
 	}
 
 	if (client_fd < 0 || req.host.empty()) {
+		LOG_ERROR("Invalid arguments for CONNECT tunnel: client_fd={}, host={}", client_fd, req.host);
 		errno = EINVAL;
 		if (out_errno != nullptr) {
 			*out_errno = errno;
@@ -378,13 +380,16 @@ bool http_proxy::forward_connect_tunnel(int client_fd, const http_conn::request_
 	const std::uint16_t upstream_port = req.port == 0 ? 443 : req.port;
 	int upstream_fd = -1;
 	if (!connect_upstream(req.host, upstream_port, upstream_fd)) {
+		LOG_ERROR("CONNECT tunnel: failed to connect to upstream {}:{}", req.host, upstream_port);
 		if (out_errno != nullptr) {
 			*out_errno = errno;
 		}
 		return false;
 	}
 
+	LOG_DEBUG("CONNECT tunnel: sending 200 Connection Established to client fd {}", client_fd);
 	if (!send_all_nonblocking(client_fd, kConnectEstablishedResponse)) {
+		LOG_ERROR("CONNECT tunnel: failed to send response to client fd {}: {}", client_fd, strerror(errno));
 		if (out_errno != nullptr) {
 			*out_errno = errno;
 		}
@@ -392,6 +397,7 @@ bool http_proxy::forward_connect_tunnel(int client_fd, const http_conn::request_
 		return false;
 	}
 
+	LOG_DEBUG("CONNECT tunnel entering data forwarding loop: client fd {}, upstream fd {}", client_fd, upstream_fd);
 	std::string c2u_buf;
 	std::string u2c_buf;
 	std::size_t c2u_offset = 0;
