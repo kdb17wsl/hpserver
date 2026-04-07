@@ -29,9 +29,7 @@ target_compile_features(llhttp PRIVATE c_std_99)
 
 target_link_libraries(hpserver_headers INTERFACE llhttp)
 
-add_executable(hpserver
-  src/main.cpp
-  src/hpserver.cpp
+add_library(hpserver_lib STATIC
   src/logger/logger.cpp
   src/net/core/poller.cpp
   src/net/core/socket_ops.cpp
@@ -39,11 +37,21 @@ add_executable(hpserver
   src/net/http/http_connection_io.cpp
   src/net/http/http_request_parser.cpp
   src/net/proxy/http_proxy.cpp
+  src/hpserver.cpp
+)
+
+target_link_libraries(hpserver_lib
+  PUBLIC
+    hpserver_headers
+)
+
+add_executable(hpserver
+  src/main.cpp
 )
 
 target_link_libraries(hpserver
   PRIVATE
-    hpserver_headers
+    hpserver_lib
 )
 
 include(CTest)
