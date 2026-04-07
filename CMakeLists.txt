@@ -32,6 +32,7 @@ target_link_libraries(hpserver_headers INTERFACE llhttp)
 add_executable(hpserver
   src/main.cpp
   src/hpserver.cpp
+  src/logger/logger.cpp
   src/net/core/poller.cpp
   src/net/core/socket_ops.cpp
   src/net/http/http_conn.cpp

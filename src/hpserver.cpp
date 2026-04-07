@@ -7,9 +7,9 @@
 
 #include <cerrno>
 #include <cstring>
-#include <iostream>
 
 #include "net/proxy/http_proxy.h"
+#include "logger/logger.h"
 
 namespace {
 constexpr std::uint32_t kClientEvents = EPOLLIN | EPOLLET | EPOLLRDHUP;
@@ -26,12 +26,12 @@ hpserver::~hpserver() {
 bool hpserver::set_nonblocking(int fd) const {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) {
-        perror("fcntl(F_GETFL)");
+        LOG_ERROR("fcntl(F_GETFL) failed: {}", strerror(errno));
         return false;
     }
 
     if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
-        perror("fcntl(F_SETFL)");
+        LOG_ERROR("fcntl(F_SETFL) failed: {}", strerror(errno));
         return false;
     }
 
@@ -72,6 +72,8 @@ void hpserver::refresh_client_timeout(int client_fd) {
 }
 
 void hpserver::init() {
+    logger::instance().init();
+
     connections_.resize(MAX_FD);
     proxy_inflight_.assign(MAX_FD, false);
     server_socket = socket_ops(AF_INET, SOCK_STREAM, 0);
@@ -86,7 +88,7 @@ void hpserver::init() {
 bool hpserver::init_proxy_async() {
     proxy_event_fd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (proxy_event_fd_ == -1) {
-        perror("eventfd");
+        LOG_ERROR("eventfd creation failed: {}", strerror(errno));
         return false;
     }
 
@@ -139,8 +141,7 @@ void hpserver::drain_proxy_done_events() {
         }
 
         if (!event.ok) {
-            std::cerr << "Proxy task failed for fd " << client_fd << " errno=" << event.err
-                      << std::endl;
+            logger::instance().write_log(log_level::error, "Proxy task failed for fd {}", client_fd);
             close_client(client_fd);
             continue;
         }
@@ -209,7 +210,7 @@ int hpserver::listen() {
         return -1;
     }
 
-    std::cout << "Server listening on port " << port << std::endl;
+    LOG_INFO("Server listening on port {}", port);
 
     while (true) {
         const int timeout_ms = connection_timer_.get_next_timeout_ms();
@@ -265,14 +266,14 @@ int hpserver::listen() {
 
                 if ((ev & EPOLLOUT) != 0) {
                     if (flush_client_output(client_fd) == -1) {
-                        std::cerr << "Failed to flush client fd " << client_fd << std::endl;
+                        LOG_ERROR("Failed to flush client fd {}", client_fd);
                         close_client(client_fd);
                         continue;
                     }
                 }
 
                 if (handle_client(client_fd) == -1) {
-                    std::cerr << "Failed to handle client fd " << client_fd << std::endl;
+                    LOG_ERROR("Failed to handle client fd {}", client_fd);
                     close_client(client_fd);
                 }
             }
@@ -306,7 +307,7 @@ int hpserver::handle_client(int client_fd) {
     }
 
     if (!conn.parse_available_data()) {
-        std::cerr << "HTTP parse error: " << conn.parse_error() << std::endl;
+        LOG_ERROR("HTTP parse error: {}", conn.parse_error());
         return -1;
     }
 
@@ -315,8 +316,7 @@ int hpserver::handle_client(int client_fd) {
     }
 
     const auto req = conn.request();
-    std::cout << "HTTP request complete: method=" << req.method << " url=" << req.url
-              << " host=" << req.host << " port=" << req.port << std::endl;
+    LOG_INFO("HTTP request complete: method={} url={} host={} port={}", req.method, req.url, req.host, req.port);
 
     conn.reset_for_next_message();
     proxy_inflight_[client_fd] = true;
