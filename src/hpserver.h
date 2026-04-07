@@ -44,6 +44,7 @@ private:
     thread_pool proxy_pool_;
     threadsafe_queue<proxy_done_event> proxy_done_queue_;
     std::vector<bool> proxy_inflight_;
+    std::vector<bool> close_after_flush_;
     int proxy_event_fd_ = -1;
     timer connection_timer_;
 

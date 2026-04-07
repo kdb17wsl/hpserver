@@ -46,6 +46,9 @@ void hpserver::close_client(int client_fd) {
     if (client_fd >= 0 && static_cast<std::size_t>(client_fd) < proxy_inflight_.size()) {
         proxy_inflight_[client_fd] = false;
     }
+    if (client_fd >= 0 && static_cast<std::size_t>(client_fd) < close_after_flush_.size()) {
+        close_after_flush_[client_fd] = false;
+    }
 
     poller_.remove(client_fd);
     if (client_fd >= 0 && static_cast<std::size_t>(client_fd) < connections_.size()) {
@@ -78,6 +81,7 @@ void hpserver::init() {
 
     connections_.resize(MAX_FD);
     proxy_inflight_.assign(MAX_FD, false);
+    close_after_flush_.assign(MAX_FD, false);
     server_socket = socket_ops(AF_INET, SOCK_STREAM, 0);
     int opt = 1;
     server_socket.set_option(SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -115,6 +119,8 @@ void hpserver::submit_proxy_job(int client_fd, http_conn::request_info req) {
         } else {
             LOG_DEBUG("Forwarding HTTP request for client fd {} to {}:{}", client_fd, req.host, req.port);
             event.ok = http_proxy::forward_request(req, event.response, &event.err);
+            // Proxy path currently uses single-request semantics for correctness.
+            event.close_after_done = true;
         }
         if (!event.ok && event.err == 0) {
             event.err = EIO;
@@ -162,14 +168,20 @@ void hpserver::drain_proxy_done_events() {
             continue;
         }
 
-        if (event.close_after_done) {
+        connections_[client_fd]->queue_write(event.response);
+        if (flush_client_output(client_fd) == -1) {
             close_client(client_fd);
             continue;
         }
 
-        connections_[client_fd]->queue_write(event.response);
-        if (flush_client_output(client_fd) == -1) {
-            close_client(client_fd);
+        if (event.close_after_done) {
+            if (connections_[client_fd]->has_pending_write()) {
+                if (static_cast<std::size_t>(client_fd) < close_after_flush_.size()) {
+                    close_after_flush_[client_fd] = true;
+                }
+            } else {
+                close_client(client_fd);
+            }
             continue;
         }
 
@@ -190,6 +202,13 @@ int hpserver::flush_client_output(int client_fd) {
         ssize_t n = conn.flush_to_socket();
         if (n > 0) {
             continue;
+        }
+
+        if (n == 0 && conn.has_pending_write()) {
+            if (poller_.modify(client_fd, kClientEvents | EPOLLOUT) != 0) {
+                return -1;
+            }
+            return 0;
         }
 
         if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
@@ -280,7 +299,7 @@ int hpserver::listen() {
                 const int client_fd = events[i].data.fd;
                 const std::uint32_t ev = events[i].events;
 
-                if ((ev & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) != 0) {
+                if ((ev & (EPOLLERR | EPOLLHUP)) != 0) {
                     close_client(client_fd);
                     continue;
                 }
@@ -292,6 +311,13 @@ int hpserver::listen() {
                 if ((ev & EPOLLOUT) != 0) {
                     if (flush_client_output(client_fd) == -1) {
                         LOG_ERROR("Failed to flush client fd {}", client_fd);
+                        close_client(client_fd);
+                        continue;
+                    }
+
+                    if (static_cast<std::size_t>(client_fd) < close_after_flush_.size() &&
+                        close_after_flush_[client_fd] &&
+                        !connections_[client_fd]->has_pending_write()) {
                         close_client(client_fd);
                         continue;
                     }
