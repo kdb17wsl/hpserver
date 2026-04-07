@@ -109,7 +109,7 @@ bool http_proxy::connect_upstream(const std::string& host, std::uint16_t port,
 
 	struct addrinfo* result = nullptr;
 	const std::string port_str = std::to_string(port);
-	LOG_INFO("Connecting to upstream {}:{}", host, port);
+	LOG_DEBUG("Connecting to upstream {}:{}", host, port);
 	if (::getaddrinfo(host.c_str(), port_str.c_str(), &hints, &result) != 0) {
 		LOG_ERROR("DNS lookup failed for {}:{}", host, port);
 		return false;
@@ -207,7 +207,6 @@ bool http_proxy::forward_request(const http_conn::request_info& req,
 	while (true) {
 		ssize_t n = ::recv(upstream_fd, buf, sizeof(buf), 0);
 		if (n > 0) {
-			LOG_DEBUG("Received {} bytes response from upstream fd {}", n, upstream_fd);
 			out_response.append(buf, static_cast<std::size_t>(n));
 			continue;
 		}
@@ -363,7 +362,7 @@ std::string http_proxy::build_forward_request(const http_conn::request_info& req
 
 bool http_proxy::forward_connect_tunnel(int client_fd, const http_conn::request_info& req,
 									int* out_errno) {
-	LOG_INFO("Establishing CONNECT tunnel for {}:{} on client fd {}", req.host, req.port, client_fd);
+	LOG_DEBUG("Establishing CONNECT tunnel for {}:{} on client fd {}", req.host, req.port, client_fd);
 	if (out_errno != nullptr) {
 		*out_errno = 0;
 	}

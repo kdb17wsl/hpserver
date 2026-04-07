@@ -40,7 +40,7 @@ bool hpserver::set_nonblocking(int fd) const {
 }
 
 void hpserver::close_client(int client_fd) {
-    LOG_INFO("Closing client connection on fd {}", client_fd);
+    LOG_DEBUG("Closing client connection on fd {}", client_fd);
     connection_timer_.remove(client_fd);
 
     if (client_fd >= 0 && static_cast<std::size_t>(client_fd) < proxy_inflight_.size()) {
@@ -269,13 +269,12 @@ int hpserver::listen() {
                         continue;
                     }
 
-                    LOG_INFO("New connection accepted: fd={} from {}:{}", client_fd, 
+                    LOG_DEBUG("New connection accepted: fd={} from {}:{}", client_fd, 
                              inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
                     connections_[client_fd] = std::make_unique<http_conn>(client_fd);
                     refresh_client_timeout(client_fd);
                 }
             } else if (events[i].data.fd == proxy_event_fd_) {
-                LOG_DEBUG("Waking up to drain proxy done events");
                 drain_proxy_done_events();
             } else {
                 const int client_fd = events[i].data.fd;
@@ -342,7 +341,7 @@ int hpserver::handle_client(int client_fd) {
     }
 
     const auto req = conn.request();
-    LOG_INFO("HTTP request complete: method={} url={} host={} port={}", req.method, req.url,
+    LOG_DEBUG("HTTP request complete: method={} url={} host={} port={}", req.method, req.url,
              req.host, req.port);
 
     conn.reset_for_next_message();

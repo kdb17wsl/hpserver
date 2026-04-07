@@ -1,6 +1,7 @@
 # CMake and build system artifacts
 /build/
 /build-*/
+/build_release/
 /cmake-build-*/
 /CMakeFiles/
 /CMakeCache.txt

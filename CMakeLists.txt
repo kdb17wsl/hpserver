@@ -45,6 +45,10 @@ target_link_libraries(hpserver_lib
     hpserver_headers
 )
 
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_definitions(hpserver_lib PUBLIC DISABLE_LOGGING)
+endif()
+
 add_executable(hpserver
   src/main.cpp
 )

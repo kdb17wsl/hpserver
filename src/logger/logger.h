@@ -81,6 +81,12 @@ private:
     std::condition_variable cv;
 };
 
+#ifdef DISABLE_LOGGING
+#define LOG_INFO(fmt, ...) ((void)0)
+#define LOG_WARNING(fmt, ...) ((void)0)
+#define LOG_ERROR(fmt, ...) ((void)0)
+#define LOG_DEBUG(fmt, ...) ((void)0)
+#else
 #define LOG_INFO(fmt, ...)                                                              \
     logger::instance().write_log(log_level::info, std::source_location::current(), fmt, \
                                  ##__VA_ARGS__)
@@ -93,3 +99,4 @@ private:
 #define LOG_DEBUG(fmt, ...)                                                              \
     logger::instance().write_log(log_level::debug, std::source_location::current(), fmt, \
                                  ##__VA_ARGS__)
+#endif
