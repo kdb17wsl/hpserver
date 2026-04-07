@@ -141,7 +141,7 @@ void hpserver::drain_proxy_done_events() {
         }
 
         if (!event.ok) {
-            logger::instance().write_log(log_level::error, "Proxy task failed for fd {}", client_fd);
+            LOG_ERROR("Proxy task failed for fd {}", client_fd);
             close_client(client_fd);
             continue;
         }

@@ -1,11 +1,16 @@
 #pragma once
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <filesystem>
 #include <format>
+#include <fstream>
+#include <memory>
+#include <mutex>
+#include <source_location>
 #include <string>
 #include <thread>
-#include <fstream>
-#include <atomic>
-#include <memory>
 
 #include "util/ring_buffer.h"
 
@@ -22,27 +27,46 @@ public:
     }
 
     template <typename... Args>
-    void write_log(log_level level, std::format_string<Args...> fmt, Args&&... args) {
-        std::string formatted_message = std::format(fmt, std::forward<Args>(args)...);
+    void write_log(log_level level, const std::source_location location,
+                   std::format_string<Args...> fmt, Args&&... args) {
+        auto now = std::chrono::system_clock::now();
+        auto now_time_t = std::chrono::system_clock::to_time_t(now);
+        auto now_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
 
-        std::string log_entry;
+        std::tm tm_now;
+        localtime_r(&now_time_t, &tm_now);
+
+        std::string level_str;
         switch (level) {
             case log_level::info:
-                log_entry = "[INFO] " + formatted_message;
+                level_str = "INFO";
                 break;
             case log_level::warning:
-                log_entry = "[WARNING] " + formatted_message;
+                level_str = "WARN";
                 break;
             case log_level::error:
-                log_entry = "[ERROR] " + formatted_message;
+                level_str = "ERROR";
                 break;
             case log_level::debug:
-                log_entry = "[DEBUG] " + formatted_message;
+                level_str = "DEBUG";
                 break;
         }
 
+        std::string filename = std::filesystem::path(location.file_name()).filename().string();
+        std::string user_msg = std::format(fmt, std::forward<Args>(args)...);
+
+        // 格式: [2026-3-27 10:00:00.000] [INFO] [main.cpp:42] message
+        std::string log_entry =
+            std::format("[{:04d}-{:02d}-{:02d} {:02d}:{:02d}:{:02d}.{:03d}] [{}] [{}:{}] {}",
+                        tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday, tm_now.tm_hour,
+                        tm_now.tm_min, tm_now.tm_sec, static_cast<int>(now_ms.count()), level_str,
+                        filename, location.line(), user_msg);
+
         if (log_queue) {
-            log_queue->push(std::move(log_entry));
+            if (log_queue->push(std::move(log_entry))) {
+                cv.notify_one();
+            }
         }
     }
 
@@ -52,9 +76,20 @@ private:
     std::unique_ptr<ring_buffer<std::string>> log_queue;
     std::thread write_thread;
     std::atomic<bool> running{false};
+
+    std::mutex mtx;
+    std::condition_variable cv;
 };
 
-#define LOG_INFO(fmt, ...) logger::instance().write_log(log_level::info, fmt, ##__VA_ARGS__)
-#define LOG_WARNING(fmt, ...) logger::instance().write_log(log_level::warning, fmt, ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...) logger::instance().write_log(log_level::error, fmt, ##__VA_ARGS__)
-#define LOG_DEBUG(fmt, ...) logger::instance().write_log(log_level::debug, fmt, ##__VA_ARGS__)
+#define LOG_INFO(fmt, ...)                                                              \
+    logger::instance().write_log(log_level::info, std::source_location::current(), fmt, \
+                                 ##__VA_ARGS__)
+#define LOG_WARNING(fmt, ...)                                                              \
+    logger::instance().write_log(log_level::warning, std::source_location::current(), fmt, \
+                                 ##__VA_ARGS__)
+#define LOG_ERROR(fmt, ...)                                                              \
+    logger::instance().write_log(log_level::error, std::source_location::current(), fmt, \
+                                 ##__VA_ARGS__)
+#define LOG_DEBUG(fmt, ...)                                                              \
+    logger::instance().write_log(log_level::debug, std::source_location::current(), fmt, \
+                                 ##__VA_ARGS__)

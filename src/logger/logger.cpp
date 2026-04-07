@@ -14,10 +14,13 @@ void logger::init(const std::string& log_path, const size_t buffer_size) {
         }
 
         while (running || (log_queue && !log_queue->empty())) {
+            std::unique_lock<std::mutex> lock(mtx);
+            cv.wait(lock, [this] {
+                return !running || (log_queue && !log_queue->empty());
+            });
+
             auto log_entry_opt = log_queue->pop();
             if (!log_entry_opt) {
-                if (!running) break;
-                std::this_thread::yield();
                 continue;
             }
 
@@ -31,7 +34,11 @@ void logger::init(const std::string& log_path, const size_t buffer_size) {
 }
 
 logger::~logger() {
-    running = false;
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        running = false;
+    }
+    cv.notify_all();
     if (write_thread.joinable()) {
         write_thread.join();
     }
