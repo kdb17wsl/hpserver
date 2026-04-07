@@ -1,12 +1,12 @@
 这份实现的核心可以概括成一句话：
 
-主线程只负责 epoll 驱动的连接接入、HTTP 读写和连接状态维护；真正的上游转发交给线程池执行，完成后再通过 eventfd 唤醒主线程回写响应。
+主线程只负责 epoll 驱动的连接接入、HTTP 读写和连接状态维护；上游转发请求（支持普通 HTTP 和 CONNECT 隧道）交给线程池完成，完成后通过 eventfd 唤醒主线程处理结果。
 
 它可以拆成 3 条协作链路：
 
 1. 监听与连接管理链路，负责 accept、close 和超时回收。
 2. 客户端读写链路，负责 EPOLLIN 和 EPOLLOUT 下的数据收发。
-3. 代理异步链路，负责线程池转发、完成队列和 eventfd 通知。
+3. 代理异步链路，负责线程池转发（支持分级处理）、完成队列和 eventfd 通知。
 
 ## 1. 关键状态与约束
 
@@ -103,24 +103,25 @@ handle_client() 在 [src/hpserver.cpp](../src/hpserver.cpp#L287) 到 [src/hpserv
 
 这里有一个很明确的边界：HTTP 解析是在线程池之外完成的，解析后的业务转发才异步出去。这让 reactor 线程只处理 IO 和状态，不承担上游耗时。
 
-## 8. 异步代理链路怎么闭环
+## 8. 异步代理链路处理
 
-submit_proxy_job() 在 [src/hpserver.cpp](../src/hpserver.cpp#L102) 到 [src/hpserver.cpp](../src/hpserver.cpp#L119)。它把“转发请求”封装成一个线程池任务，执行步骤是：
+submit_proxy_job() 在 [src/hpserver.cpp](../src/hpserver.cpp#L102) 到 [src/hpserver.cpp](../src/hpserver.cpp#L119)。它根据请求类型分发任务：
 
-1. 把任务丢进 proxy_pool_。
-2. 在线程池线程里调用 http_proxy::forward_request(req, response, err)。
-3. 生成 proxy_done_event 并推入 proxy_done_queue_。
-4. 往 eventfd 写入 1，唤醒主线程。
+1. **普通请求**：调用 `http_proxy::forward_request`。
+2. **CONNECT 隧道**：标记 `close_after_done = true` 并调用 `http_proxy::forward_connect_tunnel`，该函数会在独立线程内利用 `poll` 维持泵式双向转发，见 [src/net/proxy/http_proxy.cpp](../src/net/proxy/http_proxy.cpp)。
 
-主线程收到 eventfd 可读后，进入 drain_proxy_done_events()，见 [src/hpserver.cpp](../src/hpserver.cpp#L121) 到 [src/hpserver.cpp](../src/hpserver.cpp#L156)。它会先把 eventfd 读空，再不断 try_pop 完成队列。对每个完成事件，它会：
+任务完成后，通过以下步骤闭环：
 
-1. 校验 client_fd 仍然有效，失效则直接丢弃。
-2. 把 proxy_inflight_[fd] 置 false，表示这个连接可以接收下一个请求了。
-3. 如果 event.ok 为 false，就打印错误并关闭连接。
-4. 如果成功，就把 response 放进连接发送缓冲，然后调用 flush_client_output() 尽快写回客户端。
-5. 如果写成功，再刷新超时。
+1. 把结果推入 `proxy_done_queue_`。
+2. 往 `eventfd` 写入 1，触发 Reactor 线程唤醒。
 
-这个闭环的重点是线程边界清晰：工作线程只负责生成结果，不直接修改 epoll 状态，也不直接碰连接的 IO 轮转；真正的写回和状态推进仍然由主线程统一完成。
+主线程收到 `eventfd` 可读信号后，进入 `drain_proxy_done_events()`：
+
+1. 校验 `client_fd` 有效性。
+2. 若 `close_after_done` 为真（CONNECT 完成），直接 `close_client` 并结束。
+3. 若为普通请求，将响应放入写缓冲并调用 `flush_client_output`。
+
+这个闭环的重点是线程边界清晰：工作线程负责复杂的阻塞式或泵式转发逻辑，不修改 `epoll` 状态；写回和最终销毁仍然由主线程统一维护。
 
 ## 9. 响应写回是怎么做的
 
@@ -134,18 +135,16 @@ flush_client_output() 在 [src/hpserver.cpp](../src/hpserver.cpp#L158) 到 [src/
 
 这个函数的职责很纯粹：只负责把“待发缓冲”和“epoll 关注项”同步起来。
 
-## 10. 一次完整请求的时间线
+## 10. 全程生命周期 (按时间线)
 
-按时间顺序看，一次请求从进入到回写，大致是这样的：
+1. 客户端连接到来，初始化 `http_conn`，挂载超时定时器。
+2. 触发 `EPOLLIN`，`handle_client` 读取并利用 `llhttp` 增量解析。
+3. 解析完成后：
+   - **普通 HTTP**: 提交任务到线程池进行上游 `forward_request`。
+   - **CONNECT**: 提交任务并发起 `poll` 驱动的泵式隧道转发（如 HTTPS 穿透）。
+4. 代理任务通过完成队列和 `eventfd` 异步回送结果。
+5. Reactor 线程在 `drain_proxy_done_events` 中：
+   - 更新 `proxy_inflight_` 状态。
+   - 回写或根据任务类型（CONNECT）执行连接关闭。
 
-1. 客户端连接到来，创建 http_conn 并注册超时。
-2. 客户端发送请求，触发 EPOLLIN。
-3. handle_client() 读取 socket 并增量解析。
-4. 请求完整后提交代理任务，并标记该连接 inflight。
-5. 工作线程把请求转发到上游并拿到响应。
-6. 工作线程把完成事件放入队列，再写 eventfd。
-7. 主线程被唤醒，drain_proxy_done_events() 把响应塞回连接写缓冲。
-8. 如果一次没写完，就开启 EPOLLOUT 等下一轮继续写。
-9. 写完后关闭 EPOLLOUT，连接继续等待下一次请求或空闲超时。
-
-如果后续你想继续优化这份文档，我建议下一步把它再拆成两份：一份讲“事件循环和连接状态机”，另一份讲“代理异步通路和线程边界”，这样更方便和源码逐段对照。
+如果后续还需要更深层的性能优化，建议关注 `eventfd` 在高并发场景下的批量读取优化。
