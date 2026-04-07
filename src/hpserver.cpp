@@ -105,7 +105,12 @@ void hpserver::submit_proxy_job(int client_fd, http_conn::request_info req) {
     proxy_pool_.push([this, client_fd, req = std::move(req)]() mutable {
         proxy_done_event event;
         event.client_fd = client_fd;
-        event.ok = http_proxy::forward_request(req, event.response, &event.err);
+        if (req.is_connect) {
+            event.close_after_done = true;
+            event.ok = http_proxy::forward_connect_tunnel(client_fd, req, &event.err);
+        } else {
+            event.ok = http_proxy::forward_request(req, event.response, &event.err);
+        }
         if (!event.ok && event.err == 0) {
             event.err = EIO;
         }
@@ -142,6 +147,11 @@ void hpserver::drain_proxy_done_events() {
 
         if (!event.ok) {
             LOG_ERROR("Proxy task failed for fd {}", client_fd);
+            close_client(client_fd);
+            continue;
+        }
+
+        if (event.close_after_done) {
             close_client(client_fd);
             continue;
         }
@@ -316,7 +326,8 @@ int hpserver::handle_client(int client_fd) {
     }
 
     const auto req = conn.request();
-    LOG_INFO("HTTP request complete: method={} url={} host={} port={}", req.method, req.url, req.host, req.port);
+    LOG_INFO("HTTP request complete: method={} url={} host={} port={}", req.method, req.url,
+             req.host, req.port);
 
     conn.reset_for_next_message();
     proxy_inflight_[client_fd] = true;

@@ -29,6 +29,7 @@ private:
         int client_fd = -1;
         bool ok = false;
         std::string response;
+        bool close_after_done = false;
         int err = 0;
     };
 

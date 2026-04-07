@@ -20,4 +20,6 @@ private:
 public:
     static bool forward_request(const http_conn::request_info& req,
                                 std::string& out_response, int* out_errno = nullptr);
+    static bool forward_connect_tunnel(int client_fd, const http_conn::request_info& req,
+                                       int* out_errno = nullptr);
 };

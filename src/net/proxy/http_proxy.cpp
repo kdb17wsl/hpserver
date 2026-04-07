@@ -2,6 +2,7 @@
 
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -13,6 +14,56 @@
 
 namespace {
 constexpr std::size_t kIoBufferSize = 8192;
+constexpr char kConnectEstablishedResponse[] =
+    "HTTP/1.1 200 Connection Established\r\n"
+    "Proxy-Agent: hpserver\r\n"
+    "\r\n";
+
+bool append_nonblocking_read(int fd, std::string& out, bool& eof) {
+	char buf[kIoBufferSize];
+	while (true) {
+		ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+		if (n > 0) {
+			out.append(buf, static_cast<std::size_t>(n));
+			continue;
+		}
+
+		if (n == 0) {
+			eof = true;
+			return true;
+		}
+
+		if (errno == EINTR) {
+			continue;
+		}
+		if (errno == EAGAIN || errno == EWOULDBLOCK) {
+			return true;
+		}
+		return false;
+	}
+}
+
+bool flush_nonblocking(int fd, std::string& buf, std::size_t& offset) {
+	while (offset < buf.size()) {
+		ssize_t n = ::send(fd, buf.data() + offset, buf.size() - offset, 0);
+		if (n > 0) {
+			offset += static_cast<std::size_t>(n);
+			continue;
+		}
+
+		if (n == -1 && errno == EINTR) {
+			continue;
+		}
+		if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			return true;
+		}
+		return false;
+	}
+
+	buf.clear();
+	offset = 0;
+	return true;
+}
 }
 
 bool http_proxy::wait_fd(int fd, std::uint32_t events) {
@@ -308,4 +359,126 @@ std::string http_proxy::build_forward_request(const http_conn::request_info& req
 	out.append("\r\n");
 	out.append(req.body);
 	return out;
+}
+
+bool http_proxy::forward_connect_tunnel(int client_fd, const http_conn::request_info& req,
+									int* out_errno) {
+	if (out_errno != nullptr) {
+		*out_errno = 0;
+	}
+
+	if (client_fd < 0 || req.host.empty()) {
+		errno = EINVAL;
+		if (out_errno != nullptr) {
+			*out_errno = errno;
+		}
+		return false;
+	}
+
+	const std::uint16_t upstream_port = req.port == 0 ? 443 : req.port;
+	int upstream_fd = -1;
+	if (!connect_upstream(req.host, upstream_port, upstream_fd)) {
+		if (out_errno != nullptr) {
+			*out_errno = errno;
+		}
+		return false;
+	}
+
+	if (!send_all_nonblocking(client_fd, kConnectEstablishedResponse)) {
+		if (out_errno != nullptr) {
+			*out_errno = errno;
+		}
+		::close(upstream_fd);
+		return false;
+	}
+
+	std::string c2u_buf;
+	std::string u2c_buf;
+	std::size_t c2u_offset = 0;
+	std::size_t u2c_offset = 0;
+	bool client_eof = false;
+	bool upstream_eof = false;
+	bool upstream_write_shutdown = false;
+	bool client_write_shutdown = false;
+
+	while (true) {
+		if (!flush_nonblocking(upstream_fd, c2u_buf, c2u_offset)) {
+			break;
+		}
+		if (!flush_nonblocking(client_fd, u2c_buf, u2c_offset)) {
+			break;
+		}
+
+		if (client_eof && c2u_buf.empty() && !upstream_write_shutdown) {
+			::shutdown(upstream_fd, SHUT_WR);
+			upstream_write_shutdown = true;
+		}
+		if (upstream_eof && u2c_buf.empty() && !client_write_shutdown) {
+			::shutdown(client_fd, SHUT_WR);
+			client_write_shutdown = true;
+		}
+
+		if (client_eof && upstream_eof && c2u_buf.empty() && u2c_buf.empty()) {
+			::close(upstream_fd);
+			return true;
+		}
+
+		struct pollfd fds[2] = {};
+		fds[0].fd = client_fd;
+		fds[0].events = 0;
+		if (!client_eof && c2u_buf.empty()) {
+			fds[0].events |= POLLIN;
+		}
+		if (!u2c_buf.empty()) {
+			fds[0].events |= POLLOUT;
+		}
+
+		fds[1].fd = upstream_fd;
+		fds[1].events = 0;
+		if (!upstream_eof && u2c_buf.empty()) {
+			fds[1].events |= POLLIN;
+		}
+		if (!c2u_buf.empty()) {
+			fds[1].events |= POLLOUT;
+		}
+
+		if (fds[0].events == 0 && fds[1].events == 0) {
+			continue;
+		}
+
+		int n = ::poll(fds, 2, kIoTimeoutMs);
+		if (n == 0) {
+			errno = ETIMEDOUT;
+			break;
+		}
+		if (n < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			break;
+		}
+
+		if ((fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0 ||
+			(fds[1].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+			errno = ECONNRESET;
+			break;
+		}
+
+		if ((fds[0].revents & POLLIN) != 0) {
+			if (!append_nonblocking_read(client_fd, c2u_buf, client_eof)) {
+				break;
+			}
+		}
+		if ((fds[1].revents & POLLIN) != 0) {
+			if (!append_nonblocking_read(upstream_fd, u2c_buf, upstream_eof)) {
+				break;
+			}
+		}
+	}
+
+	if (out_errno != nullptr) {
+		*out_errno = errno;
+	}
+	::close(upstream_fd);
+	return false;
 }
