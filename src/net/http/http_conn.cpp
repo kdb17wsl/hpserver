@@ -1,9 +1,14 @@
 #include "http_conn.h"
+#include "logger/logger.h"
 
 http_conn::http_conn(int fd) : io_(fd) {}
 
 ssize_t http_conn::read_from_socket() {
-    return io_.read_from_socket();
+    ssize_t n = io_.read_from_socket();
+    if (n > 0) {
+        LOG_DEBUG("Read {} bytes from fd {}", n, io_.fd());
+    }
+    return n;
 }
 
 void http_conn::queue_write(std::string_view data) { io_.queue_write(data); }
@@ -22,6 +27,7 @@ bool http_conn::parse_available_data() {
     std::string_view remain(io_.read_buffer().data() + parse_offset_,
                             io_.read_buffer().size() - parse_offset_);
     if (!parser_.parse(remain)) {
+        LOG_ERROR("HTTP parse error on fd {}: {}", io_.fd(), parser_.parse_error());
         return false;
     }
 
@@ -30,6 +36,7 @@ bool http_conn::parse_available_data() {
 }
 
 void http_conn::reset_for_next_message() {
+    LOG_DEBUG("Resetting HTTP conn for fd {} for next message", io_.fd());
     if (parse_offset_ > 0) {
         io_.consume_read_bytes(parse_offset_);
     }

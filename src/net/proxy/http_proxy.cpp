@@ -9,6 +9,7 @@
 #include <cstring>
 
 #include "poller.h"
+#include "logger/logger.h"
 
 namespace {
 constexpr std::size_t kIoBufferSize = 8192;
@@ -57,7 +58,9 @@ bool http_proxy::connect_upstream(const std::string& host, std::uint16_t port,
 
 	struct addrinfo* result = nullptr;
 	const std::string port_str = std::to_string(port);
+	LOG_INFO("Connecting to upstream {}:{}", host, port);
 	if (::getaddrinfo(host.c_str(), port_str.c_str(), &hints, &result) != 0) {
+		LOG_ERROR("DNS lookup failed for {}:{}", host, port);
 		return false;
 	}
 
@@ -72,11 +75,13 @@ bool http_proxy::connect_upstream(const std::string& host, std::uint16_t port,
 		if (ret == 0) {
 			upstream_fd = fd;
 			connected = true;
+			LOG_DEBUG("Directly connected to upstream {}:{} (fd: {})", host, port, upstream_fd);
 			break;
 		}
 
 		if (ret == -1 && errno == EINPROGRESS) {
 			if (!wait_fd(fd, EPOLLOUT)) {
+				LOG_WARNING("Connection timeout/refused by wait_fd for {}:{}", host, port);
 				::close(fd);
 				continue;
 			}
@@ -84,6 +89,7 @@ bool http_proxy::connect_upstream(const std::string& host, std::uint16_t port,
 			int so_error = 0;
 			socklen_t so_error_len = sizeof(so_error);
 			if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &so_error_len) != 0) {
+				LOG_ERROR("getsockopt failed: {}", strerror(errno));
 				::close(fd);
 				continue;
 			}
@@ -91,13 +97,19 @@ bool http_proxy::connect_upstream(const std::string& host, std::uint16_t port,
 			if (so_error == 0) {
 				upstream_fd = fd;
 				connected = true;
+				LOG_DEBUG("Async connected to upstream {}:{} (fd: {})", host, port, upstream_fd);
 				break;
 			}
 
+			LOG_WARNING("Async connection failed for {}:{}: {}", host, port, strerror(so_error));
 			errno = so_error;
 		}
 
 		::close(fd);
+	}
+
+	if (!connected) {
+		LOG_ERROR("Failed to connect to any address for {}:{}", host, port);
 	}
 
 	::freeaddrinfo(result);
@@ -122,14 +134,17 @@ bool http_proxy::forward_request(const http_conn::request_info& req,
 
 	int upstream_fd = -1;
 	if (!connect_upstream(req.host, req.port, upstream_fd)) {
+		LOG_ERROR("Failed to connect to upstream {}:{}: {}", req.host, req.port, strerror(errno));
 		if (out_errno != nullptr) {
 			*out_errno = errno;
 		}
 		return false;
 	}
 
+	LOG_DEBUG("Forwarding request to upstream fd {} ({})", upstream_fd, req.host);
 	bool ok = send_all_nonblocking(upstream_fd, forward);
 	if (!ok) {
+		LOG_ERROR("Failed to send request to upstream fd {}: {}", upstream_fd, strerror(errno));
 		if (out_errno != nullptr) {
 			*out_errno = errno;
 		}
@@ -141,22 +156,26 @@ bool http_proxy::forward_request(const http_conn::request_info& req,
 	while (true) {
 		ssize_t n = ::recv(upstream_fd, buf, sizeof(buf), 0);
 		if (n > 0) {
+			LOG_DEBUG("Received {} bytes response from upstream fd {}", n, upstream_fd);
 			out_response.append(buf, static_cast<std::size_t>(n));
 			continue;
 		}
 
 		if (n == 0) {
+			LOG_DEBUG("Upstream closed connection (fd: {})", upstream_fd);
 			break;
 		}
 
 		if (errno == EAGAIN || errno == EWOULDBLOCK) {
 			if (!wait_fd(upstream_fd, EPOLLIN)) {
+				LOG_WARNING("Wait for upstream response timeout/error (fd: {})", upstream_fd);
 				ok = false;
 				break;
 			}
 			continue;
 		}
 
+		LOG_ERROR("Error receiving from upstream fd {}: {}", upstream_fd, strerror(errno));
 		ok = false;
 		break;
 	}
