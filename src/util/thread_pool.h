@@ -18,7 +18,7 @@ using FunctionalWrapper = std::function<void()>;
 
 class thread_pool {
 public:
-    thread_pool() : thread_count(std::thread::hardware_concurrency()) {
+    thread_pool() : thread_count(1024) {
         waiting_thread_count.store(0);
         is_stopped.store(false);
         is_done.store(false);
