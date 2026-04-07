@@ -7,7 +7,7 @@
 
 class http_proxy {
 private:
-    static constexpr int kIoTimeoutMs = 1000;
+    static constexpr int kIoTimeoutMs = 20000;
 
     static bool wait_fd(int fd, std::uint32_t events);
     static bool connect_upstream(const std::string& host, std::uint16_t port,
