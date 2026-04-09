@@ -1,150 +1,94 @@
-这份实现的核心可以概括成一句话：
+# hpserver 核心架构与异步逻辑深度解析
 
-主线程只负责 epoll 驱动的连接接入、HTTP 读写和连接状态维护；上游转发请求（支持普通 HTTP 和 CONNECT 隧道）交给线程池完成，完成后通过 eventfd 唤醒主线程处理结果。
+`hpserver` 采用 **单线程 Reactor + 动态 Worker 线程池** 的混合架构。其设计的精髓在于通过 `proxy_inflight_` 标志位实现了文件描述符（FD）在 **事件驱动流** 与 **阻塞任务流** 之间的原子级所有权切换。
 
-它可以拆成 3 条协作链路：
+## 1. 核心组件与交互模型 (Architecture)
 
-1. 监听与连接管理链路，负责 accept、close 和超时回收。
-2. 客户端读写链路，负责 EPOLLIN 和 EPOLLOUT 下的数据收发。
-3. 代理异步链路，负责线程池转发（支持分级处理）、完成队列和 eventfd 通知。
+### 1.1 线程分工
+*   **Reactor 线程 (Main Thread)**:
+    *   **职责**: 处理 `epoll_wait`、`accept`、`llhttp` 协议解析、定时器管理、以及最终的 `close_client`。
+    *   **原则**: 绝对不执行任何可能导致阻塞的操作（如远程 DNS 查询、连接上游服务器）。
+*   **Worker 线程池 (Thread Pool)**:
+    *   **职责**: 执行具体的代理逻辑（`forward_request` 或 `forward_connect_tunnel`）。
+    *   **原则**: 模拟同步阻塞流程以简化业务开发，完成后通过 `eventfd` 异步通知 Reactor。
 
-## 1. 关键状态与约束
+### 1.2 FD 所有权移交 (The In-flight Token)
+这是系统最关键的设计细节：
+1.  **Reactor 拥有权**: 初始状态下，客户端 FD 在 `epoll` 中受 Reactor 监控。
+2.  **移交**: 当解析出完整的 HTTP 请求时，Reactor 设置 `proxy_inflight_[client_fd] = true`，并提交任务给线程池。
+3.  **屏蔽**: 主循环在处理 `client_fd` 的 `EPOLLIN` 事件时，会检查 `proxy_inflight_`。如果是 `true`，则 **直接跳过** 对该 FD 的读取和解析，防止 Reactor 与 Worker 同时操作同一个 Socket。
+4.  **归还**: Worker 完成任务后，通过 `proxy_event_fd_` 唤醒 Reactor。Reactor 在 `drain_proxy_done_events` 中重置标志位，重新接管 FD。
 
-相关常量定义在 [src/hpserver.cpp](../src/hpserver.cpp#L14) 到 [src/hpserver.cpp](../src/hpserver.cpp#L16)。其中：
+---
 
-- kClientEvents = EPOLLIN | EPOLLET | EPOLLRDHUP，表示客户端连接采用边沿触发，并关注对端半关闭。
-- kClientIdleTimeoutMs = 15000，表示空闲 15 秒后回收连接。
+## 2. CONNECT 隧道：双向数据泵 (Data Pump)
 
-资源释放也很明确：析构函数只负责关闭 proxy_event_fd_，避免 eventfd 泄漏，见 [src/hpserver.cpp](../src/hpserver.cpp#L19) 到 [src/hpserver.cpp](../src/hpserver.cpp#L24)。
+与普通 HTTP 转发不同，`CONNECT` 方法要求建立一个透明的 TCP 管道。
 
-## 2. 启动流程
+### 2.1 建立流程 (http_proxy.cpp)
+1.  **识别**: `llhttp` 回调检测到 `CONNECT` 方法。
+2.  **推派**: Reactor 将任务丢给 Worker 线程。
+3.  **上游连接**: Worker 调用 `socket_ops::connect_at_idx` 同步连接目标服务器。
+4.  **握手确认**: Worker 手动构造 `HTTP/1.1 200 Connection Established\r\n\r\n` 并通过 `socket_ops::send` 发回给客户端。
 
-入口是 [src/hpserver.cpp](../src/hpserver.cpp#L190) 的 listen()。
+### 2.2 循环泵 (The Loop)
+Worker 线程进入一个 `while(true)` 循环，使用 **独立的 `::poll`** 系统调用：
+*   **多路监听**: 同时监听 `client_fd` 和 `upstream_fd`。
+*   **字节透传**: 
+    *   `client` 有数据 -> `recv` -> `upstream` -> `send`。
+    *   `upstream` 有数据 -> `recv` -> `client` -> `send`。
+*   **退出条件**: 任何一方关闭连接（`recv` 返回 0）或出现致命错误。
 
-启动顺序是固定的：
+---
 
-1. 调用 init()，初始化连接数组、代理 inflight 标记和监听 socket，见 [src/hpserver.cpp](../src/hpserver.cpp#L74) 到 [src/hpserver.cpp](../src/hpserver.cpp#L84)。
-2. 把监听 socket 设为非阻塞，见 [src/hpserver.cpp](../src/hpserver.cpp#L193) 到 [src/hpserver.cpp](../src/hpserver.cpp#L195) 和 [src/hpserver.cpp](../src/hpserver.cpp#L26) 到 [src/hpserver.cpp](../src/hpserver.cpp#L39)。
-3. 执行 bind() 和 listen()，见 [src/hpserver.cpp](../src/hpserver.cpp#L197) 到 [src/hpserver.cpp](../src/hpserver.cpp#L202)。
-4. 把监听 fd 加入 epoll，监听 EPOLLIN | EPOLLET，见 [src/hpserver.cpp](../src/hpserver.cpp#L204) 到 [src/hpserver.cpp](../src/hpserver.cpp#L206)。
-5. 初始化 eventfd，并把它也注册到 epoll 中，用于代理任务完成后的唤醒，见 [src/hpserver.cpp](../src/hpserver.cpp#L86) 到 [src/hpserver.cpp](../src/hpserver.cpp#L99)。
+## 3. 延迟关闭：安全着陆 (Lazy Close)
 
-任一步失败都会直接返回 -1，因此 listen() 是一个严格的失败即退出入口。
+在代理模式下，Worker 线程可能在瞬间生成大量响应数据，而客户端 Socket 缓存已满。
 
-## 3. 主循环怎么跑
+### 3.1 `close_after_flush_` 机制
+当 Worker 任务完成时，它可能带有 `close_after_done` 标志（例如 CONNECT 隧道结束或 `Connection: close` 请求）。
 
-主循环在 [src/hpserver.cpp](../src/hpserver.cpp#L214) 到 [src/hpserver.cpp](../src/hpserver.cpp#L282)。每一轮做四件事：
+1.  **进入队列**: Reactor 从完成队列读取事件。
+2.  **状态判定**:
+    *   若 `client_fd` 的输出缓冲区为空，直接调用 `close_client`。
+    *   若缓冲区尚有残留，设置 `close_after_flush_[client_fd] = true`。
+3.  **渐进写回**: 在后续的 `EPOLLOUT` 事件中，`flush_client_output` 会持续尝试清空数据。
+4.  **最终清理**: 只有当缓冲区彻底归零 **且** `close_after_flush_` 为真时，连接才会被物理释放 (hpserver.cpp)。这保证了响应数据的“完整落袋”。
 
-1. 根据 connection_timer_.get_next_timeout_ms() 计算 epoll_wait 的超时时间，见 [src/hpserver.cpp](../src/hpserver.cpp#L215) 到 [src/hpserver.cpp](../src/hpserver.cpp#L217)。
-2. 调 poller_.wait() 获取当前就绪事件，见 [src/hpserver.cpp](../src/hpserver.cpp#L216) 到 [src/hpserver.cpp](../src/hpserver.cpp#L219)。
-3. 逐个分发事件：监听 fd、eventfd 或客户端 fd，见 [src/hpserver.cpp](../src/hpserver.cpp#L221) 到 [src/hpserver.cpp](../src/hpserver.cpp#L279)。
-4. 最后执行 connection_timer_.tick()，让超时任务真正触发，见 [src/hpserver.cpp](../src/hpserver.cpp#L281) 到 [src/hpserver.cpp](../src/hpserver.cpp#L281)。
+---
 
-这个循环的本质是一个单线程 reactor：所有 fd 状态切换、epoll 关注项变化和 http_conn 对象操作都在这里完成。
+## 4. 定时器与超时管理 (Timer System)
 
-## 4. 新连接是怎么接进来的
+服务器使用一个 **基于最小堆 (Min-Heap)** 的定时器轮，确保大量连接下的扫描效率。
 
-当监听 fd 可读时，进入 accept 分支，见 [src/hpserver.cpp](../src/hpserver.cpp#L222) 到 [src/hpserver.cpp](../src/hpserver.cpp#L250)。
+### 4.1 惰性更新 (Lazy Update)
+为了避免频繁调整堆结构：
+*   **Version 机制**: 每个连接在定时器中关联一个 `version_id`。
+*   **调整**: 当连接有活动需要重置超时时，只需在 `unordered_map` 中更新版本号并插入一个新节点到堆中。
+*   **清理**: 当堆顶元素由于时间到期弹出时，校验其版本号。如果不是当前最新版本，直接丢弃（该节点已被更新的操作“作废”）。
 
-这里用了 while(true) 连续 accept，原因是 EPOLLET 要求把内核里当前可接受的连接尽量一次取空。每次 accept 的处理规则是：
+---
 
-- 如果返回 EINTR，就继续重试。
-- 如果返回 EAGAIN 或 EWOULDBLOCK，说明这轮已经没有新连接了，退出循环。
-- 其他错误则停止接收这一轮连接。
+## 5. 请求全生命周期溯源 (Sequence)
 
-对每个新 client_fd，会按顺序做四件事：
+1.  **[Reactor] Accept**: 接受连接，初始化 `http_conn`，注册 `epoll`，开启 `connection_timer_`。
+2.  **[Reactor] Decode**: 累积 `queue_read` 数据，`llhttp` 增量流式解析。
+3.  **[Reactor] Hand-off**:
+    *   普通 HTTP: 提取 `url`, `headers`, `body` 到 `proxy_job` 对象。
+    *   CONNECT: 捕获目标 `host` 和 `port`。
+    *   **设置 `proxy_inflight_ = true`** 并提交。
+4.  **[Worker] Proxy Execute**:
+    *   执行阻塞式连接与 IO。
+    *   普通 HTTP 响应存入线程局部的 `std::string` 缓冲区。
+5.  **[Worker] Notify**: 向 `proxy_done_queue_` 压入结果并写 `eventfd`。
+6.  **[Reactor] Drain Notification**:
+    *   **重置 `proxy_inflight_ = false`**。
+    *   将结果写入 `queue_write`。
+    *   根据需要触发 `close_after_flush_`。
+7.  **[Reactor] Finalize**: `flush_client_output` 清空缓冲，移除定时器，回收资源。
 
-1. 设置非阻塞。
-2. 加入 epoll，关注 kClientEvents。
-3. 检查 fd 是否落在 [0, MAX_FD) 内。
-4. 创建 http_conn 并放入 connections_[client_fd]，然后刷新超时。
+---
 
-这保证了每个新连接一进入系统，就同时具备“非阻塞 IO、epoll 监听和超时回收”三个基础能力。
-
-## 5. 客户端事件的处理顺序
-
-普通客户端 fd 的处理在 [src/hpserver.cpp](../src/hpserver.cpp#L253) 到 [src/hpserver.cpp](../src/hpserver.cpp#L277)。它的顺序很重要：
-
-1. 先检查 EPOLLERR、EPOLLHUP、EPOLLRDHUP。只要出现这些事件，就直接 close_client()，见 [src/hpserver.cpp](../src/hpserver.cpp#L257) 到 [src/hpserver.cpp](../src/hpserver.cpp#L260)。
-2. 如果出现 EPOLLIN 或 EPOLLOUT，先刷新超时，见 [src/hpserver.cpp](../src/hpserver.cpp#L262) 到 [src/hpserver.cpp](../src/hpserver.cpp#L264)。
-3. 如果有 EPOLLOUT，先 flush_client_output()，见 [src/hpserver.cpp](../src/hpserver.cpp#L266) 到 [src/hpserver.cpp](../src/hpserver.cpp#L272)。
-4. 最后调用 handle_client() 处理读路径，见 [src/hpserver.cpp](../src/hpserver.cpp#L274) 到 [src/hpserver.cpp](../src/hpserver.cpp#L277)。
-
-这个顺序的含义是：写优先于读路径中的后续处理。即使这一轮只想写响应，代码也仍然会顺手跑一次 handle_client()，因此读写逻辑是串行地在同一轮事件里完成的，而不是拆成两个独立状态机。
-
-## 6. close 和超时是怎么收尾的
-
-close_client() 在 [src/hpserver.cpp](../src/hpserver.cpp#L41) 到 [src/hpserver.cpp](../src/hpserver.cpp#L52)。它做的事情按顺序是：
-
-1. 从定时器里移除该 fd。
-2. 把 proxy_inflight_[fd] 复位为 false。
-3. 从 epoll 中删除该 fd。
-4. 释放 connections_[fd] 持有的 http_conn。
-
-refresh_client_timeout() 在 [src/hpserver.cpp](../src/hpserver.cpp#L54) 到 [src/hpserver.cpp](../src/hpserver.cpp#L72)。它有两个分支：
-
-- 如果定时器里已经有这个 fd，就直接 adjust 到 15 秒。
-- 如果还没有，就注册一个新的超时任务，回调里再次检查连接是否仍有效，然后调用 close_client()。
-
-这种“双重检查”很关键，因为定时器回调触发时，连接可能已经被 epoll 路径提前关闭了。
-
-## 7. HTTP 请求是怎么读出来的
-
-handle_client() 在 [src/hpserver.cpp](../src/hpserver.cpp#L287) 到 [src/hpserver.cpp](../src/hpserver.cpp#L326)。它的逻辑可以理解为“先读、再解析、完整后提交异步任务”。
-
-具体步骤如下：
-
-1. 先检查 fd 和 connections_[fd] 是否有效，无效则返回 -1，并设置 errno=ENOENT。
-2. 如果 proxy_inflight_[fd] 为 true，直接返回 0，表示这个连接已经有一个请求在异步处理中，不继续读新请求，见 [src/hpserver.cpp](../src/hpserver.cpp#L295) 到 [src/hpserver.cpp](../src/hpserver.cpp#L298)。
-3. 调用 conn.read_from_socket() 读取数据；如果是 EAGAIN 或 EWOULDBLOCK，返回 0，说明只是暂时没数据可读。
-4. 调用 conn.parse_available_data() 解析已有缓冲；如果失败，打印 parse_error() 并返回 -1。
-5. 如果请求还没完整到达，返回 0，继续等下一轮 EPOLLIN。
-6. 当请求完整时，取出 req，打印日志，调用 conn.reset_for_next_message()，把 proxy_inflight_[fd] 置 true，然后 submit_proxy_job() 把请求交给线程池。
-
-这里有一个很明确的边界：HTTP 解析是在线程池之外完成的，解析后的业务转发才异步出去。这让 reactor 线程只处理 IO 和状态，不承担上游耗时。
-
-## 8. 异步代理链路处理
-
-submit_proxy_job() 在 [src/hpserver.cpp](../src/hpserver.cpp#L102) 到 [src/hpserver.cpp](../src/hpserver.cpp#L119)。它根据请求类型分发任务：
-
-1. **普通请求**：调用 `http_proxy::forward_request`。
-2. **CONNECT 隧道**：标记 `close_after_done = true` 并调用 `http_proxy::forward_connect_tunnel`，该函数会在独立线程内利用 `poll` 维持泵式双向转发，见 [src/net/proxy/http_proxy.cpp](../src/net/proxy/http_proxy.cpp)。
-
-任务完成后，通过以下步骤闭环：
-
-1. 把结果推入 `proxy_done_queue_`。
-2. 往 `eventfd` 写入 1，触发 Reactor 线程唤醒。
-
-主线程收到 `eventfd` 可读信号后，进入 `drain_proxy_done_events()`：
-
-1. 校验 `client_fd` 有效性。
-2. 若 `close_after_done` 为真（CONNECT 完成），直接 `close_client` 并结束。
-3. 若为普通请求，将响应放入写缓冲并调用 `flush_client_output`。
-
-这个闭环的重点是线程边界清晰：工作线程负责复杂的阻塞式或泵式转发逻辑，不修改 `epoll` 状态；写回和最终销毁仍然由主线程统一维护。
-
-## 9. 响应写回是怎么做的
-
-flush_client_output() 在 [src/hpserver.cpp](../src/hpserver.cpp#L158) 到 [src/hpserver.cpp](../src/hpserver.cpp#L188)。它是标准的非阻塞写回压处理：
-
-1. 先检查 fd 和连接是否有效。
-2. 只要 conn.has_pending_write()，就循环调用 conn.flush_to_socket()。
-3. 如果 flush_to_socket() 写出了一部分数据，就继续写，直到写不动为止。
-4. 如果返回 EAGAIN 或 EWOULDBLOCK，说明内核发送缓冲满了，于是把 epoll 关注项改成 kClientEvents | EPOLLOUT，等下次可写再续写。
-5. 如果全部写完，就把 epoll 关注项改回 kClientEvents，去掉 EPOLLOUT。
-
-这个函数的职责很纯粹：只负责把“待发缓冲”和“epoll 关注项”同步起来。
-
-## 10. 全程生命周期 (按时间线)
-
-1. 客户端连接到来，初始化 `http_conn`，挂载超时定时器。
-2. 触发 `EPOLLIN`，`handle_client` 读取并利用 `llhttp` 增量解析。
-3. 解析完成后：
-   - **普通 HTTP**: 提交任务到线程池进行上游 `forward_request`。
-   - **CONNECT**: 提交任务并发起 `poll` 驱动的泵式隧道转发（如 HTTPS 穿透）。
-4. 代理任务通过完成队列和 `eventfd` 异步回送结果。
-5. Reactor 线程在 `drain_proxy_done_events` 中：
-   - 更新 `proxy_inflight_` 状态。
-   - 回写或根据任务类型（CONNECT）执行连接关闭。
-
-如果后续还需要更深层的性能优化，建议关注 `eventfd` 在高并发场景下的批量读取优化。
+### 技术亮点提示
+*   **零拷贝趋势**: 虽然目前使用 `std::string` 作为中转，但 `socket_ops::send` 结合 `queue_write` 的流式处理为未来引入 `sendfile` 或 `splice` 留下了空间。
+*   **边缘触发 (ET)**: `kClientEvents` 使用了 `EPOLLET`，要求读写必须循环至 `EAGAIN`，代码在 `socket_ops::recv` 和 `socket_ops::send` 中严格遵循了这一规范。
