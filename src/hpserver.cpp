@@ -15,6 +15,10 @@
 namespace {
 constexpr std::uint32_t kClientEvents = EPOLLIN | EPOLLET | EPOLLRDHUP;
 constexpr int kClientIdleTimeoutMs = 15000;
+
+bool is_expected_connect_shutdown_errno(int err) {
+    return err == ECONNRESET || err == EPIPE || err == ENOTCONN || err == ECONNABORTED;
+}
 }
 
 hpserver::~hpserver() {
@@ -112,6 +116,7 @@ void hpserver::submit_proxy_job(int client_fd, http_conn::request_info req) {
     proxy_pool_.push([this, client_fd, req = std::move(req)]() mutable {
         proxy_done_event event;
         event.client_fd = client_fd;
+        event.is_connect = req.is_connect;
         if (req.is_connect) {
             LOG_DEBUG("Starting CONNECT tunnel for client fd {}", client_fd);
             event.close_after_done = true;
@@ -127,7 +132,11 @@ void hpserver::submit_proxy_job(int client_fd, http_conn::request_info req) {
         }
 
         if (!event.ok) {
-            LOG_ERROR("Proxy operation failed for fd {}: {}", client_fd, strerror(event.err));
+            if (event.is_connect && is_expected_connect_shutdown_errno(event.err)) {
+                LOG_DEBUG("CONNECT tunnel ended for fd {}: {}", client_fd, strerror(event.err));
+            } else {
+                LOG_ERROR("Proxy operation failed for fd {}: {}", client_fd, strerror(event.err));
+            }
         } else {
             LOG_DEBUG("Proxy job completed for fd {}", client_fd);
         }
@@ -163,7 +172,11 @@ void hpserver::drain_proxy_done_events() {
         }
 
         if (!event.ok) {
-            LOG_ERROR("Proxy task failed for fd {}", client_fd);
+            if (event.is_connect && is_expected_connect_shutdown_errno(event.err)) {
+                LOG_DEBUG("CONNECT task finished after peer shutdown for fd {}", client_fd);
+            } else {
+                LOG_ERROR("Proxy task failed for fd {}", client_fd);
+            }
             close_client(client_fd);
             continue;
         }

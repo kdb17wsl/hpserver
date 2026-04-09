@@ -30,6 +30,7 @@ private:
         bool ok = false;
         std::string response;
         bool close_after_done = false;
+        bool is_connect = false;
         int err = 0;
     };
 
