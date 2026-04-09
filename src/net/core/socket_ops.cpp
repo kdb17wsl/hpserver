@@ -15,9 +15,7 @@ socket_ops::socket_ops(int domain, int type, int protocol) {
 
 socket_ops& socket_ops::operator=(socket_ops&& other) noexcept {
     if (this != &other) {
-        if (fd_ != -1) {
-            close(fd_);
-        }
+        reset();
         fd_ = other.fd_;
         other.fd_ = -1;
     }
@@ -25,9 +23,20 @@ socket_ops& socket_ops::operator=(socket_ops&& other) noexcept {
 }
 
 socket_ops::~socket_ops() {
+    reset();
+}
+
+int socket_ops::release() {
+    int fd = fd_;
+    fd_ = -1;
+    return fd;
+}
+
+void socket_ops::reset(int new_fd) {
     if (fd_ != -1) {
-        close(fd_);
+        ::close(fd_);
     }
+    fd_ = new_fd;
 }
 
 int socket_ops::bind(const struct sockaddr* addr, socklen_t addrlen) const {
@@ -56,8 +65,16 @@ int socket_ops::accept(struct sockaddr* addr, socklen_t* addrlen) const {
 
 int socket_ops::connect(const struct sockaddr* addr, socklen_t addrlen) const {
     int ret = ::connect(fd_, addr, addrlen);
-    if (ret == -1) {
+    if (ret == -1 && errno != EINPROGRESS && errno != EINTR) {
         perror("connect");
+    }
+    return ret;
+}
+
+int socket_ops::shutdown(int how) const {
+    int ret = ::shutdown(fd_, how);
+    if (ret == -1) {
+        perror("shutdown");
     }
     return ret;
 }
@@ -74,6 +91,30 @@ ssize_t socket_ops::write(const void* buf, size_t count) const {
     ssize_t ret = ::write(fd_, buf, count);
     if (ret == -1) {
         perror("write");
+    }
+    return ret;
+}
+
+ssize_t socket_ops::recv(void* buf, size_t len, int flags) const {
+    ssize_t ret = ::recv(fd_, buf, len, flags);
+    if (ret == -1 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        perror("recv");
+    }
+    return ret;
+}
+
+ssize_t socket_ops::send(const void* buf, size_t len, int flags) const {
+    ssize_t ret = ::send(fd_, buf, len, flags);
+    if (ret == -1 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        perror("send");
+    }
+    return ret;
+}
+
+int socket_ops::get_option(int level, int optname, void* optval, socklen_t* optlen) const {
+    int ret = ::getsockopt(fd_, level, optname, optval, optlen);
+    if (ret == -1) {
+        perror("getsockopt");
     }
     return ret;
 }

@@ -13,6 +13,7 @@
 #include <string_view>
 
 #include "poller.h"
+#include "socket_ops.h"
 #include "logger/logger.h"
 
 namespace {
@@ -27,6 +28,30 @@ bool append_nonblocking_read(int fd, std::string& out, bool& eof) {
 	char buf[kIoBufferSize];
 	while (true) {
 		ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+		if (n > 0) {
+			out.append(buf, static_cast<std::size_t>(n));
+			continue;
+		}
+
+		if (n == 0) {
+			eof = true;
+			return true;
+		}
+
+		if (errno == EINTR) {
+			continue;
+		}
+		if (errno == EAGAIN || errno == EWOULDBLOCK) {
+			return true;
+		}
+		return false;
+	}
+}
+
+bool append_nonblocking_read(const socket_ops& sock, std::string& out, bool& eof) {
+	char buf[kIoBufferSize];
+	while (true) {
+		ssize_t n = sock.recv(buf, sizeof(buf), 0);
 		if (n > 0) {
 			out.append(buf, static_cast<std::size_t>(n));
 			continue;
@@ -66,6 +91,55 @@ bool flush_nonblocking(int fd, std::string& buf, std::size_t& offset) {
 
 	buf.clear();
 	offset = 0;
+	return true;
+}
+
+bool flush_nonblocking(const socket_ops& sock, std::string& buf, std::size_t& offset) {
+	while (offset < buf.size()) {
+		ssize_t n = sock.send(buf.data() + offset, buf.size() - offset, 0);
+		if (n > 0) {
+			offset += static_cast<std::size_t>(n);
+			continue;
+		}
+
+		if (n == -1 && errno == EINTR) {
+			continue;
+		}
+		if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			return true;
+		}
+		return false;
+	}
+
+	buf.clear();
+	offset = 0;
+	return true;
+}
+
+bool send_all_nonblocking_socket(const socket_ops& sock, int fd_for_wait, const std::string& data,
+							  bool (*wait_fn)(int, std::uint32_t)) {
+	std::size_t offset = 0;
+	while (offset < data.size()) {
+		ssize_t n = sock.send(data.data() + offset, data.size() - offset, 0);
+		if (n > 0) {
+			offset += static_cast<std::size_t>(n);
+			continue;
+		}
+
+		if (n == -1 && errno == EINTR) {
+			continue;
+		}
+
+		if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			if (!wait_fn(fd_for_wait, EPOLLOUT)) {
+				return false;
+			}
+			continue;
+		}
+
+		return false;
+	}
+
 	return true;
 }
 
@@ -218,8 +292,8 @@ bool http_proxy::wait_fd(int fd, std::uint32_t events) {
 }
 
 bool http_proxy::connect_upstream(const std::string& host, std::uint16_t port,
-								  int& upstream_fd) {
-	upstream_fd = -1;
+								  socket_ops& upstream) {
+	upstream.reset();
 
 	struct addrinfo hints {};
 	hints.ai_family = AF_UNSPEC;
@@ -235,46 +309,42 @@ bool http_proxy::connect_upstream(const std::string& host, std::uint16_t port,
 
 	bool connected = false;
 	for (struct addrinfo* ai = result; ai != nullptr && !connected; ai = ai->ai_next) {
-		int fd = ::socket(ai->ai_family, ai->ai_socktype | SOCK_NONBLOCK, ai->ai_protocol);
-		if (fd == -1) {
+		socket_ops candidate(ai->ai_family, ai->ai_socktype | SOCK_NONBLOCK, ai->ai_protocol);
+		if (!candidate.valid()) {
 			continue;
 		}
 
-		int ret = ::connect(fd, ai->ai_addr, ai->ai_addrlen);
+		int ret = candidate.connect(ai->ai_addr, ai->ai_addrlen);
 		if (ret == 0) {
-			upstream_fd = fd;
+			upstream = std::move(candidate);
 			connected = true;
-			LOG_DEBUG("Directly connected to upstream {}:{} (fd: {})", host, port, upstream_fd);
+			LOG_DEBUG("Directly connected to upstream {}:{} (fd: {})", host, port, upstream.get_fd());
 			break;
 		}
 
 		if (ret == -1 && errno == EINPROGRESS) {
-			if (!wait_fd(fd, EPOLLOUT)) {
+			if (!wait_fd(candidate.get_fd(), EPOLLOUT)) {
 				LOG_WARNING("Connection timeout/refused by wait_fd for {}:{}", host, port);
-				::close(fd);
 				continue;
 			}
 
 			int so_error = 0;
 			socklen_t so_error_len = sizeof(so_error);
-			if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &so_error_len) != 0) {
+			if (candidate.get_option(SOL_SOCKET, SO_ERROR, &so_error, &so_error_len) != 0) {
 				LOG_ERROR("getsockopt failed: {}", strerror(errno));
-				::close(fd);
 				continue;
 			}
 
 			if (so_error == 0) {
-				upstream_fd = fd;
+				upstream = std::move(candidate);
 				connected = true;
-				LOG_DEBUG("Async connected to upstream {}:{} (fd: {})", host, port, upstream_fd);
+				LOG_DEBUG("Async connected to upstream {}:{} (fd: {})", host, port, upstream.get_fd());
 				break;
 			}
 
 			LOG_WARNING("Async connection failed for {}:{}: {}", host, port, strerror(so_error));
 			errno = so_error;
 		}
-
-		::close(fd);
 	}
 
 	if (!connected) {
@@ -305,13 +375,14 @@ bool http_proxy::forward_request(const http_conn::request_info& req,
 	for (int attempt = 0; attempt < 2; ++attempt) {
 		out_response.clear();
 
-		int upstream_fd = -1;
-		if (!connect_upstream(req.host, req.port, upstream_fd)) {
+		socket_ops upstream;
+		if (!connect_upstream(req.host, req.port, upstream)) {
 			final_errno = errno;
 			LOG_ERROR("Failed to connect to upstream {}:{}: {}", req.host, req.port, strerror(final_errno));
 		} else {
+			const int upstream_fd = upstream.get_fd();
 			LOG_DEBUG("Forwarding request to upstream fd {} ({})", upstream_fd, req.host);
-			bool ok = send_all_nonblocking(upstream_fd, forward);
+			bool ok = send_all_nonblocking_socket(upstream, upstream_fd, forward, &http_proxy::wait_fd);
 			if (!ok) {
 				final_errno = errno;
 				LOG_ERROR("Failed to send request to upstream fd {}: {}", upstream_fd, strerror(final_errno));
@@ -325,7 +396,7 @@ bool http_proxy::forward_request(const http_conn::request_info& req,
 				std::size_t expected_total = 0;
 				int partial_read_timeout_retries = 0;
 				while (true) {
-					ssize_t n = ::recv(upstream_fd, buf, sizeof(buf), 0);
+					ssize_t n = upstream.recv(buf, sizeof(buf), 0);
 					if (n > 0) {
 						out_response.append(buf, static_cast<std::size_t>(n));
 						partial_read_timeout_retries = 0;
@@ -394,12 +465,9 @@ bool http_proxy::forward_request(const http_conn::request_info& req,
 				}
 
 				if (ok) {
-					::close(upstream_fd);
 					return true;
 				}
 			}
-
-			::close(upstream_fd);
 		}
 
 		if (attempt == 0 && (final_errno == ETIMEDOUT || final_errno == ECONNRESET)) {
@@ -560,14 +628,15 @@ bool http_proxy::forward_connect_tunnel(int client_fd, const http_conn::request_
 	}
 
 	const std::uint16_t upstream_port = req.port == 0 ? 443 : req.port;
-	int upstream_fd = -1;
-	if (!connect_upstream(req.host, upstream_port, upstream_fd)) {
+	socket_ops upstream;
+	if (!connect_upstream(req.host, upstream_port, upstream)) {
 		LOG_ERROR("CONNECT tunnel: failed to connect to upstream {}:{}", req.host, upstream_port);
 		if (out_errno != nullptr) {
 			*out_errno = errno;
 		}
 		return false;
 	}
+	const int upstream_fd = upstream.get_fd();
 
 	LOG_DEBUG("CONNECT tunnel: sending 200 Connection Established to client fd {}", client_fd);
 	if (!send_all_nonblocking(client_fd, kConnectEstablishedResponse)) {
@@ -575,7 +644,6 @@ bool http_proxy::forward_connect_tunnel(int client_fd, const http_conn::request_
 		if (out_errno != nullptr) {
 			*out_errno = errno;
 		}
-		::close(upstream_fd);
 		return false;
 	}
 
@@ -590,7 +658,7 @@ bool http_proxy::forward_connect_tunnel(int client_fd, const http_conn::request_
 	bool client_write_shutdown = false;
 
 	while (true) {
-		if (!flush_nonblocking(upstream_fd, c2u_buf, c2u_offset)) {
+		if (!flush_nonblocking(upstream, c2u_buf, c2u_offset)) {
 			break;
 		}
 		if (!flush_nonblocking(client_fd, u2c_buf, u2c_offset)) {
@@ -598,7 +666,7 @@ bool http_proxy::forward_connect_tunnel(int client_fd, const http_conn::request_
 		}
 
 		if (client_eof && c2u_buf.empty() && !upstream_write_shutdown) {
-			::shutdown(upstream_fd, SHUT_WR);
+			upstream.shutdown(SHUT_WR);
 			upstream_write_shutdown = true;
 		}
 		if (upstream_eof && u2c_buf.empty() && !client_write_shutdown) {
@@ -607,7 +675,6 @@ bool http_proxy::forward_connect_tunnel(int client_fd, const http_conn::request_
 		}
 
 		if (client_eof && upstream_eof && c2u_buf.empty() && u2c_buf.empty()) {
-			::close(upstream_fd);
 			return true;
 		}
 
@@ -658,7 +725,7 @@ bool http_proxy::forward_connect_tunnel(int client_fd, const http_conn::request_
 			}
 		}
 		if ((fds[1].revents & POLLIN) != 0) {
-			if (!append_nonblocking_read(upstream_fd, u2c_buf, upstream_eof)) {
+			if (!append_nonblocking_read(upstream, u2c_buf, upstream_eof)) {
 				break;
 			}
 		}
@@ -667,6 +734,5 @@ bool http_proxy::forward_connect_tunnel(int client_fd, const http_conn::request_
 	if (out_errno != nullptr) {
 		*out_errno = errno;
 	}
-	::close(upstream_fd);
 	return false;
 }

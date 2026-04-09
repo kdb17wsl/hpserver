@@ -17,12 +17,19 @@ public:
     socket_ops& operator=(socket_ops&& other) noexcept;
     ~socket_ops();
 
+    bool valid() const { return fd_ >= 0; }
     int get_fd() const { return fd_; }
+    int release();
+    void reset(int new_fd = -1);
     int bind(const struct sockaddr* addr, socklen_t addrlen) const;
     int listen(int backlog) const;
     int accept(struct sockaddr* addr, socklen_t* addrlen) const;
     int connect(const struct sockaddr* addr, socklen_t addrlen) const;
+    int shutdown(int how) const;
     ssize_t read(void* buf, size_t count) const;
     ssize_t write(const void* buf, size_t count) const;
+    ssize_t recv(void* buf, size_t len, int flags = 0) const;
+    ssize_t send(const void* buf, size_t len, int flags = 0) const;
+    int get_option(int level, int optname, void* optval, socklen_t* optlen) const;
     int set_option(int level, int optname, const void* optval, socklen_t optlen) const;
 };
