@@ -8,6 +8,7 @@
 
 #include <cctype>
 #include <cerrno>
+#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <string_view>
@@ -116,8 +117,9 @@ bool flush_nonblocking(const socket_ops& sock, std::string& buf, std::size_t& of
 	return true;
 }
 
+template <typename WaitFn>
 bool send_all_nonblocking_socket(const socket_ops& sock, int fd_for_wait, const std::string& data,
-							  bool (*wait_fn)(int, std::uint32_t)) {
+							  WaitFn&& wait_fn) {
 	std::size_t offset = 0;
 	while (offset < data.size()) {
 		ssize_t n = sock.send(data.data() + offset, data.size() - offset, 0);
@@ -382,7 +384,9 @@ bool http_proxy::forward_request(const http_conn::request_info& req,
 		} else {
 			const int upstream_fd = upstream.get_fd();
 			LOG_DEBUG("Forwarding request to upstream fd {} ({})", upstream_fd, req.host);
-			bool ok = send_all_nonblocking_socket(upstream, upstream_fd, forward, &http_proxy::wait_fd);
+			bool ok = send_all_nonblocking_socket(
+				upstream, upstream_fd, forward,
+				[](int fd, std::uint32_t events) { return http_proxy::wait_fd(fd, events); });
 			if (!ok) {
 				final_errno = errno;
 				LOG_ERROR("Failed to send request to upstream fd {}: {}", upstream_fd, strerror(final_errno));
@@ -678,7 +682,7 @@ bool http_proxy::forward_connect_tunnel(int client_fd, const http_conn::request_
 			return true;
 		}
 
-		struct pollfd fds[2] = {};
+		std::array<struct pollfd, 2> fds {};
 		fds[0].fd = client_fd;
 		fds[0].events = 0;
 		if (!client_eof && c2u_buf.empty()) {
@@ -701,7 +705,7 @@ bool http_proxy::forward_connect_tunnel(int client_fd, const http_conn::request_
 			continue;
 		}
 
-		int n = ::poll(fds, 2, kIoTimeoutMs);
+		int n = ::poll(fds.data(), static_cast<nfds_t>(fds.size()), kIoTimeoutMs);
 		if (n == 0) {
 			errno = ETIMEDOUT;
 			break;
