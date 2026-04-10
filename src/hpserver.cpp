@@ -312,7 +312,7 @@ int hpserver::listen() {
                 const int client_fd = events[i].data.fd;
                 const std::uint32_t ev = events[i].events;
 
-                if ((ev & (EPOLLERR | EPOLLHUP)) != 0) {
+                if ((ev & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) != 0) {
                     close_client(client_fd);
                     continue;
                 }
@@ -336,9 +336,11 @@ int hpserver::listen() {
                     }
                 }
 
-                if (handle_client(client_fd) == -1) {
-                    LOG_ERROR("Failed to handle client fd {}", client_fd);
-                    close_client(client_fd);
+                if ((ev & EPOLLIN) != 0) {
+                    if (handle_client(client_fd) == -1) {
+                        LOG_ERROR("Failed to handle client fd {}", client_fd);
+                        close_client(client_fd);
+                    }
                 }
             }
         }

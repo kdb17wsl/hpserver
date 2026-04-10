@@ -27,6 +27,7 @@ public:
         e.expires_at = expire;
         e.callback = std::move(callback);
         heap_.push(node{id, expire, e.version});
+        maybe_compact_heap();
     }
 
     void adjust(int id, int timeout_ms) {
@@ -39,9 +40,13 @@ public:
         ++e.version;
         e.expires_at = clock_type::now() + std::chrono::milliseconds(timeout_ms);
         heap_.push(node{id, e.expires_at, e.version});
+        maybe_compact_heap();
     }
 
-    void remove(int id) { entries_.erase(id); }
+    void remove(int id) {
+        entries_.erase(id);
+        maybe_compact_heap();
+    }
 
     void tick() {
         while (true) {
@@ -89,6 +94,9 @@ public:
     std::size_t size() const { return entries_.size(); }
 
 private:
+    static constexpr std::size_t kCompactMinHeapSize = 4096;
+    static constexpr std::size_t kCompactRatioThreshold = 4;
+
     struct node {
         int id;
         time_point expires_at;
@@ -113,6 +121,32 @@ private:
             }
             heap_.pop();
         }
+    }
+
+    /// @brief Compacts the heap by removing stale entries 
+    /// if the heap size is significantly larger than the number of live entries.
+    void maybe_compact_heap() {
+        if (heap_.size() < kCompactMinHeapSize) {
+            return;
+        }
+
+        const std::size_t live_count = entries_.size();
+        if (live_count == 0) {
+            while (!heap_.empty()) {
+                heap_.pop();
+            }
+            return;
+        }
+
+        if (heap_.size() <= live_count * kCompactRatioThreshold) {
+            return;
+        }
+
+        std::priority_queue<node, std::vector<node>, std::greater<node>> rebuilt;
+        for (const auto& [id, e] : entries_) {
+            rebuilt.push(node{id, e.expires_at, e.version});
+        }
+        heap_ = std::move(rebuilt);
     }
 
     std::priority_queue<node, std::vector<node>, std::greater<node>> heap_;
