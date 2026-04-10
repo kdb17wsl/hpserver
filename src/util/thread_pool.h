@@ -2,11 +2,14 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
 #include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <new>
+#include <optional>
+#include <stdexcept>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -18,10 +21,13 @@ using FunctionalWrapper = std::function<void()>;
 
 class thread_pool {
 public:
-    thread_pool() : thread_count(std::thread::hardware_concurrency()) {
+    explicit thread_pool(unsigned int thread_count = std::thread::hardware_concurrency(),
+                         std::size_t max_queue_size = 4096)
+        : max_queue_size_(max_queue_size == 0 ? 1 : max_queue_size), thread_count(thread_count) {
         waiting_thread_count.store(0);
         is_stopped.store(false);
         is_done.store(false);
+        queued_task_count.store(0);
 
         stop_flags.reserve(thread_count);
         threads.reserve(thread_count);
@@ -42,12 +48,15 @@ public:
     void clear_queue() {
         std::unique_ptr<FunctionalWrapper> task;
         while (task_queue.try_pop(task)) {
+            task.reset();
+            on_task_dequeued();
         }
     }
 
     std::unique_ptr<FunctionalWrapper> pop_task() {
         std::unique_ptr<FunctionalWrapper> task;
         if (task_queue.try_pop(task)) {
+            on_task_dequeued();
             return task;
         }
         return nullptr;
@@ -93,6 +102,7 @@ public:
 
         std::unique_lock<std::mutex> lock(mtx);
         cv.notify_all();
+        cv_not_full.notify_all();
         lock.unlock();
 
         for (auto& thread : threads) {
@@ -111,10 +121,50 @@ public:
         using Result = std::invoke_result_t<F, Args...>;
         auto task = std::make_shared<std::packaged_task<Result()>>(
             std::bind(std::forward<F>(f), std::forward<Args>(args)...));
-        auto _f = std::make_unique<FunctionalWrapper>([task]() { (*task)(); });
-        task_queue.push(std::move(_f));
-        std::lock_guard<std::mutex> lock(mtx);
-        cv.notify_one();
+        auto wrapped = std::make_unique<FunctionalWrapper>([task]() { (*task)(); });
+
+        {
+            std::unique_lock<std::mutex> lock(mtx);
+            cv_not_full.wait(lock, [this]() {
+                return queued_task_count.load(std::memory_order_acquire) < max_queue_size_ ||
+                       is_stopped.load(std::memory_order_acquire) ||
+                       is_done.load(std::memory_order_acquire);
+            });
+
+            if (is_stopped.load(std::memory_order_acquire) ||
+                is_done.load(std::memory_order_acquire)) {
+                throw std::runtime_error("thread_pool is stopped");
+            }
+
+            task_queue.push(std::move(wrapped));
+            queued_task_count.fetch_add(1, std::memory_order_release);
+            cv.notify_one();
+        }
+
+        return task->get_future();
+    }
+
+    template <typename F, typename... Args>
+    auto try_push(F&& f, Args&&... args)
+        -> std::optional<std::future<std::invoke_result_t<F, Args...>>> {
+        using Result = std::invoke_result_t<F, Args...>;
+        auto task = std::make_shared<std::packaged_task<Result()>>(
+            std::bind(std::forward<F>(f), std::forward<Args>(args)...));
+        auto wrapped = std::make_unique<FunctionalWrapper>([task]() { (*task)(); });
+
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            if (queued_task_count.load(std::memory_order_acquire) >= max_queue_size_ ||
+                is_stopped.load(std::memory_order_acquire) ||
+                is_done.load(std::memory_order_acquire)) {
+                return std::nullopt;
+            }
+
+            task_queue.push(std::move(wrapped));
+            queued_task_count.fetch_add(1, std::memory_order_release);
+            cv.notify_one();
+        }
+
         return task->get_future();
     }
 
@@ -130,13 +180,13 @@ private:
             bool is_pop = this->task_queue.try_pop(task);
             while (true) {
                 while (is_pop) {
+                    on_task_dequeued();
                     (*task)();
                     task.reset();
                     if (flag.load()) {
                         return;
-                    } else {
-                        is_pop = this->task_queue.try_pop(task);
                     }
+                    is_pop = this->task_queue.try_pop(task);
                 }
 
                 std::unique_lock<std::mutex> lock(this->mtx);
@@ -155,11 +205,20 @@ private:
         threads.emplace_back(std::make_unique<std::thread>(func));
     }
 
+    void on_task_dequeued() {
+        const std::size_t previous = queued_task_count.fetch_sub(1, std::memory_order_acq_rel);
+        if (previous == 0) {
+            queued_task_count.store(0, std::memory_order_release);
+        }
+        cv_not_full.notify_one();
+    }
+
     static inline thread_local unsigned int tls_thread_id = 0;
 
     std::vector<std::unique_ptr<std::thread>> threads;
     std::vector<std::shared_ptr<std::atomic_bool>> stop_flags;
     threadsafe_queue<std::unique_ptr<FunctionalWrapper>> task_queue;
+    const std::size_t max_queue_size_;
 
     const unsigned int thread_count;
 
@@ -172,7 +231,9 @@ private:
     alignas(cache_line_size) std::atomic_int waiting_thread_count;
     alignas(cache_line_size) std::atomic_bool is_stopped;
     alignas(cache_line_size) std::atomic_bool is_done;
+    alignas(cache_line_size) std::atomic<std::size_t> queued_task_count;
 
     std::mutex mtx;
     std::condition_variable cv;
+    std::condition_variable cv_not_full;
 };

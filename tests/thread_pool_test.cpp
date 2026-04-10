@@ -218,3 +218,86 @@ TEST(ThreadPoolTest, MultiProducerPushExecutesAll) {
 
     pool.stop(true);
 }
+
+TEST(ThreadPoolTest, BoundedQueueAppliesBackpressure) {
+    thread_pool pool(1, 1);
+    if (pool.size() == 0) {
+        GTEST_SKIP() << "hardware_concurrency reported 0";
+    }
+
+    std::promise<void> release_first;
+    std::shared_future<void> release_signal = release_first.get_future().share();
+
+    auto first = pool.push([release_signal]() { release_signal.wait(); });
+    auto second = pool.push([]() { return 2; });
+
+    auto third_submit_and_run = std::async(std::launch::async, [&pool]() {
+        auto fut = pool.push([]() { return 3; });
+        return fut.get();
+    });
+
+    EXPECT_EQ(third_submit_and_run.wait_for(std::chrono::milliseconds(100)),
+              std::future_status::timeout);
+
+    release_first.set_value();
+
+    ASSERT_EQ(first.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_NO_THROW(first.get());
+
+    ASSERT_EQ(second.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_EQ(second.get(), 2);
+
+    ASSERT_EQ(third_submit_and_run.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_EQ(third_submit_and_run.get(), 3);
+
+    pool.stop(true);
+}
+
+TEST(ThreadPoolTest, TryPushReturnsFailureWhenQueueFull) {
+    thread_pool pool(1, 1);
+    if (pool.size() == 0) {
+        GTEST_SKIP() << "hardware_concurrency reported 0";
+    }
+
+    std::promise<void> release_first;
+    std::shared_future<void> release_signal = release_first.get_future().share();
+    std::atomic<bool> first_started{false};
+
+    auto first = pool.push([&first_started, release_signal]() {
+        first_started.store(true, std::memory_order_release);
+        release_signal.wait();
+    });
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!first_started.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    ASSERT_TRUE(first_started.load(std::memory_order_acquire));
+
+    auto second = pool.try_push([]() { return 2; });
+    auto third = pool.try_push([]() { return 3; });
+
+    ASSERT_TRUE(second.has_value());
+    EXPECT_FALSE(third.has_value());
+
+    release_first.set_value();
+
+    ASSERT_EQ(first.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_NO_THROW(first.get());
+    ASSERT_EQ(second->wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_EQ(second->get(), 2);
+
+    pool.stop(true);
+}
+
+TEST(ThreadPoolTest, TryPushReturnsFailureAfterStop) {
+    thread_pool pool(1, 4);
+    if (pool.size() == 0) {
+        GTEST_SKIP() << "hardware_concurrency reported 0";
+    }
+
+    pool.stop(false);
+    auto fut = pool.try_push([]() { return 1; });
+    EXPECT_FALSE(fut.has_value());
+}
