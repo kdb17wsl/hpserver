@@ -9,6 +9,7 @@
 #include <cerrno>
 #include <cstring>
 
+#include "net/http/http_message_builder.h"
 #include "net/proxy/http_proxy.h"
 #include "logger/logger.h"
 
@@ -111,9 +112,10 @@ bool hpserver::init_proxy_async() {
     return true;
 }
 
-void hpserver::submit_proxy_job(int client_fd, http_conn::request_info req) {
+bool hpserver::submit_proxy_job(int client_fd, http_conn::request_info req) {
     LOG_DEBUG("Submitting proxy job for client fd {}, target={}:{}", client_fd, req.host, req.port);
-    proxy_pool_.push([this, client_fd, req = std::move(req)]() mutable {
+    const bool is_connect = req.is_connect;
+    auto task_future = proxy_pool_.try_push([this, client_fd, req = std::move(req)]() mutable {
         proxy_done_event event;
         event.client_fd = client_fd;
         event.is_connect = req.is_connect;
@@ -149,6 +151,26 @@ void hpserver::submit_proxy_job(int client_fd, http_conn::request_info req) {
             (void)ignored;
         }
     });
+
+    if (!task_future.has_value()) {
+        LOG_WARNING("Proxy pool is saturated; dropping task for client fd {}", client_fd);
+        proxy_done_event event;
+        event.client_fd = client_fd;
+        event.is_connect = is_connect;
+        event.ok = false;
+        event.err = EAGAIN;
+        event.close_after_done = true;
+        proxy_done_queue_.push(std::move(event));
+
+        if (proxy_event_fd_ != -1) {
+            std::uint64_t one = 1;
+            ssize_t ignored = ::write(proxy_event_fd_, &one, sizeof(one));
+            (void)ignored;
+        }
+        return false;
+    }
+
+    return true;
 }
 
 void hpserver::drain_proxy_done_events() {
@@ -176,6 +198,21 @@ void hpserver::drain_proxy_done_events() {
                 LOG_DEBUG("CONNECT task finished after peer shutdown for fd {}", client_fd);
             } else {
                 LOG_ERROR("Proxy task failed for fd {}", client_fd);
+                const std::string error_message = std::strerror(event.err);
+                connections_[client_fd]->queue_write(
+                    http_message_builder::build_service_unavailable_response(error_message));
+                if (flush_client_output(client_fd) == -1) {
+                    close_client(client_fd);
+                    continue;
+                }
+                if (connections_[client_fd]->has_pending_write()) {
+                    if (static_cast<std::size_t>(client_fd) < close_after_flush_.size()) {
+                        close_after_flush_[client_fd] = true;
+                    }
+                } else {
+                    close_client(client_fd);
+                }
+                continue;
             }
             close_client(client_fd);
             continue;

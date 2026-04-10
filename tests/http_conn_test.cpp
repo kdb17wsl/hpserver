@@ -17,6 +17,7 @@
 #include <thread>
 
 #include "src/net/http/http_conn.h"
+#include "src/net/http/http_message_builder.h"
 #include "src/net/proxy/http_proxy.h"
 
 namespace {
@@ -341,6 +342,55 @@ TEST(HttpConnTest, ResetsAndParsesNextKeepAliveRequest) {
     EXPECT_EQ(req.host, "second.example");
     EXPECT_EQ(req.port, 9090);
     EXPECT_TRUE(req.body.empty());
+}
+
+TEST(HttpMessageBuilderTest, BuildsServiceUnavailableResponseWithCloseConnection) {
+    const std::string response =
+        http_message_builder::build_service_unavailable_response("connection refused");
+
+    EXPECT_NE(response.find("HTTP/1.1 503 Service Unavailable\r\n"), std::string::npos);
+    EXPECT_NE(response.find("Content-Type: text/plain; charset=utf-8\r\n"), std::string::npos);
+    EXPECT_NE(response.find("Connection: close\r\n"), std::string::npos);
+    EXPECT_NE(response.find("proxy upstream unavailable: connection refused"), std::string::npos);
+}
+
+TEST(HttpMessageBuilderTest, BuildsPlainTextResponseWithAccurateLength) {
+    const std::string response =
+        http_message_builder::build_plain_text_response(503, "Service Unavailable", "busy", true);
+
+    EXPECT_NE(response.find("HTTP/1.1 503 Service Unavailable\r\n"), std::string::npos);
+    EXPECT_NE(response.find("Content-Length: 4\r\n"), std::string::npos);
+    EXPECT_NE(response.rfind("busy"), std::string::npos);
+}
+
+TEST(HttpMessageBuilderTest, BuildsConnectEstablishedResponse) {
+    const std::string response =
+        http_message_builder::build_connect_established_response("hpserver-test");
+
+    EXPECT_EQ(response,
+              "HTTP/1.1 200 Connection Established\r\n"
+              "Proxy-Agent: hpserver-test\r\n"
+              "\r\n");
+}
+
+TEST(HttpMessageBuilderTest, BuildsForwardProxyRequestFilteringHopHeaders) {
+    http_request_parser::request_info req;
+    req.method = "GET";
+    req.url = "http://example.com/path?q=1";
+    req.version = "1.1";
+    req.host = "example.com";
+    req.port = 80;
+    req.headers["host"] = "example.com";
+    req.headers["connection"] = "keep-alive";
+    req.headers["x-test"] = "ok";
+
+    const std::string forward = http_message_builder::build_forward_proxy_request(req);
+
+    EXPECT_NE(forward.find("GET /path?q=1 HTTP/1.1\r\n"), std::string::npos);
+    EXPECT_NE(forward.find("host: example.com\r\n"), std::string::npos);
+    EXPECT_NE(forward.find("x-test: ok\r\n"), std::string::npos);
+    EXPECT_EQ(forward.find("connection: keep-alive\r\n"), std::string::npos);
+    EXPECT_NE(forward.find("connection: close\r\n"), std::string::npos);
 }
 
 TEST(HttpConnTest, ParsesConnectAuthorityFromRequestTarget) {

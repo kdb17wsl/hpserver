@@ -15,8 +15,6 @@ private:
                                  socket_ops& upstream);
     static bool send_all_nonblocking(int fd, const std::string& data);
     static std::string build_forward_request(const http_conn::request_info& req);
-    static std::string build_origin_form(const std::string& url);
-    static bool is_hop_by_hop_header(const std::string& key);
 
 public:
     static bool forward_request(const http_conn::request_info& req,

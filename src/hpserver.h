@@ -55,7 +55,7 @@ private:
     int handle_client(int client_fd);
     int flush_client_output(int client_fd);
     bool init_proxy_async();
-    void submit_proxy_job(int client_fd, http_conn::request_info req);
+    bool submit_proxy_job(int client_fd, http_conn::request_info req);
     void drain_proxy_done_events();
     void refresh_client_timeout(int client_fd);
 };
