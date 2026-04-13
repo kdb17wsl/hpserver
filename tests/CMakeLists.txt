@@ -62,3 +62,15 @@ target_link_libraries(bitwise_trie_test
 )
 
 gtest_discover_tests(bitwise_trie_test)
+
+add_executable(ip_filter_test
+    ip_filter_test.cpp
+)
+
+target_link_libraries(ip_filter_test
+    PRIVATE
+        hpserver_lib
+        GTest::gtest_main
+)
+
+gtest_discover_tests(ip_filter_test)

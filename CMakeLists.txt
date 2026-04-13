@@ -38,6 +38,7 @@ add_library(hpserver_lib STATIC
   src/net/http/http_request_parser.cpp
   src/net/http/http_message_builder.cpp
   src/net/proxy/http_proxy.cpp
+  src/net/core/ip_filter.cpp
   src/hpserver.cpp
 )
 
