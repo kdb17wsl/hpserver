@@ -5,7 +5,6 @@
 #include <optional>
 #include <array>
 
-namespace hpserver::util {
 
 /**
  * @brief Bitwise Trie for mapping 32-bit integer keys to values.
@@ -80,4 +79,3 @@ private:
     std::unique_ptr<node> root_;
 };
 
-} // namespace hpserver::util

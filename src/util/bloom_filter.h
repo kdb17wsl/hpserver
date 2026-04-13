@@ -6,7 +6,6 @@
 #include <array>
 #include <algorithm>
 
-namespace hpserver::util {
 
 /**
  * @brief Simple Bloom Filter implementation for fast set membership testing.
@@ -54,4 +53,3 @@ private:
     std::vector<bool> bits_;
 };
 
-} // namespace hpserver::util
