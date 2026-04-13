@@ -38,3 +38,27 @@ target_link_libraries(thread_pool_test
 )
 
 gtest_discover_tests(thread_pool_test)
+
+add_executable(bloom_filter_test
+    bloom_filter_test.cpp
+)
+
+target_link_libraries(bloom_filter_test
+    PRIVATE
+        hpserver_headers
+        GTest::gtest_main
+)
+
+gtest_discover_tests(bloom_filter_test)
+
+add_executable(bitwise_trie_test
+    bitwise_trie_test.cpp
+)
+
+target_link_libraries(bitwise_trie_test
+    PRIVATE
+        hpserver_headers
+        GTest::gtest_main
+)
+
+gtest_discover_tests(bitwise_trie_test)
