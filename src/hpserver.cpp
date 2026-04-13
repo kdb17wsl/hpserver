@@ -6,16 +6,56 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 
+#include "logger/logger.h"
 #include "net/http/http_message_builder.h"
 #include "net/proxy/http_proxy.h"
-#include "logger/logger.h"
 
 namespace {
 constexpr std::uint32_t kClientEvents = EPOLLIN | EPOLLET | EPOLLRDHUP;
 constexpr int kClientIdleTimeoutMs = 15000;
+
+constexpr unsigned int kFallbackProxyWorkers = 8;
+constexpr unsigned int kFallbackTunnelWorkers = 64;
+constexpr std::size_t kTasksPerProxyWorker = 512;
+constexpr std::size_t kTasksPerTunnelWorker = 128;
+
+unsigned int default_proxy_worker_count() {
+    const unsigned int hw = std::thread::hardware_concurrency();
+    if (hw == 0) {
+        return kFallbackProxyWorkers;
+    }
+    return std::max(2u, hw);
+}
+
+unsigned int default_tunnel_worker_count() {
+    const unsigned int hw = std::thread::hardware_concurrency();
+    if (hw == 0) {
+        return kFallbackTunnelWorkers;
+    }
+    return std::max(32u, hw * 8u);
+}
+
+unsigned int normalize_proxy_workers(unsigned int configured) {
+    return configured == 0 ? default_proxy_worker_count() : configured;
+}
+
+unsigned int normalize_tunnel_workers(unsigned int configured) {
+    return configured == 0 ? default_tunnel_worker_count() : configured;
+}
+
+std::size_t normalize_proxy_queue_size(std::size_t configured, unsigned int proxy_workers) {
+    return configured == 0 ? static_cast<std::size_t>(proxy_workers) * kTasksPerProxyWorker
+                           : configured;
+}
+
+std::size_t normalize_tunnel_queue_size(std::size_t configured, unsigned int tunnel_workers) {
+    return configured == 0 ? static_cast<std::size_t>(tunnel_workers) * kTasksPerTunnelWorker
+                           : configured;
+}
 
 bool is_expected_connect_shutdown_errno(int err) {
     return err == ECONNRESET || err == EPIPE || err == ENOTCONN || err == ECONNABORTED;
@@ -44,7 +84,17 @@ void reject_blacklisted_client(int client_fd) {
 
     ::close(client_fd);
 }
-}
+}  // namespace
+
+hpserver::hpserver(int port, unsigned int proxy_workers, unsigned int tunnel_workers,
+                   std::size_t proxy_queue_size, std::size_t tunnel_queue_size)
+    : port(port),
+      proxy_worker_count_(normalize_proxy_workers(proxy_workers)),
+      tunnel_worker_count_(normalize_tunnel_workers(tunnel_workers)),
+      proxy_queue_size_(normalize_proxy_queue_size(proxy_queue_size, proxy_worker_count_)),
+      tunnel_queue_size_(normalize_tunnel_queue_size(tunnel_queue_size, tunnel_worker_count_)),
+      proxy_pool_(proxy_worker_count_, proxy_queue_size_),
+      tunnel_pool_(tunnel_worker_count_, tunnel_queue_size_) {}
 
 hpserver::~hpserver() {
     if (proxy_event_fd_ != -1) {
@@ -98,7 +148,8 @@ void hpserver::refresh_client_timeout(int client_fd) {
 
     connection_timer_.add(client_fd, kClientIdleTimeoutMs, [this, client_fd]() {
         if (client_fd < 0 || client_fd >= MAX_FD ||
-            static_cast<std::size_t>(client_fd) >= connections_.size() || !connections_[client_fd]) {
+            static_cast<std::size_t>(client_fd) >= connections_.size() ||
+            !connections_[client_fd]) {
             return;
         }
         close_client(client_fd);
@@ -140,7 +191,8 @@ bool hpserver::init_proxy_async() {
 bool hpserver::submit_proxy_job(int client_fd, http_conn::request_info req) {
     LOG_DEBUG("Submitting proxy job for client fd {}, target={}:{}", client_fd, req.host, req.port);
     const bool is_connect = req.is_connect;
-    auto task_future = proxy_pool_.try_push([this, client_fd, req = std::move(req)]() mutable {
+    thread_pool& target_pool = is_connect ? tunnel_pool_ : proxy_pool_;
+    auto task_future = target_pool.try_push([this, client_fd, req = std::move(req)]() mutable {
         proxy_done_event event;
         event.client_fd = client_fd;
         event.is_connect = req.is_connect;
@@ -149,7 +201,8 @@ bool hpserver::submit_proxy_job(int client_fd, http_conn::request_info req) {
             event.close_after_done = true;
             event.ok = http_proxy::forward_connect_tunnel(client_fd, req, &event.err);
         } else {
-            LOG_DEBUG("Forwarding HTTP request for client fd {} to {}:{}", client_fd, req.host, req.port);
+            LOG_DEBUG("Forwarding HTTP request for client fd {} to {}:{}", client_fd, req.host,
+                      req.port);
             event.ok = http_proxy::forward_request(req, event.response, &event.err);
             // Proxy path currently uses single-request semantics for correctness.
             event.close_after_done = true;
@@ -178,7 +231,12 @@ bool hpserver::submit_proxy_job(int client_fd, http_conn::request_info req) {
     });
 
     if (!task_future.has_value()) {
-        LOG_WARNING("Proxy pool is saturated; dropping task for client fd {}", client_fd);
+        if (is_connect) {
+            LOG_WARNING("CONNECT tunnel pool is saturated; dropping task for client fd {}",
+                        client_fd);
+        } else {
+            LOG_WARNING("HTTP proxy pool is saturated; dropping task for client fd {}", client_fd);
+        }
         proxy_done_event event;
         event.client_fd = client_fd;
         event.is_connect = is_connect;
@@ -266,8 +324,7 @@ void hpserver::drain_proxy_done_events() {
 
 int hpserver::flush_client_output(int client_fd) {
     if (client_fd < 0 || client_fd >= MAX_FD ||
-        static_cast<std::size_t>(client_fd) >= connections_.size() ||
-        !connections_[client_fd]) {
+        static_cast<std::size_t>(client_fd) >= connections_.size() || !connections_[client_fd]) {
         errno = ENOENT;
         return -1;
     }
@@ -325,6 +382,10 @@ int hpserver::listen() {
         return -1;
     }
 
+    LOG_INFO(
+        "Proxy pools configured: proxy_workers={}, proxy_queue={}, tunnel_workers={}, "
+        "tunnel_queue={}",
+        proxy_worker_count_, proxy_queue_size_, tunnel_worker_count_, tunnel_queue_size_);
     LOG_INFO("Server listening on port {}", port);
 
     while (true) {
@@ -371,8 +432,8 @@ int hpserver::listen() {
                         continue;
                     }
 
-                    LOG_DEBUG("New connection accepted: fd={} from {}:{}", client_fd, 
-                             inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+                    LOG_DEBUG("New connection accepted: fd={} from {}:{}", client_fd,
+                              inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
                     connections_[client_fd] = std::make_unique<http_conn>(client_fd);
                     refresh_client_timeout(client_fd);
                 }
@@ -423,8 +484,7 @@ int hpserver::listen() {
 
 int hpserver::handle_client(int client_fd) {
     if (client_fd < 0 || client_fd >= MAX_FD ||
-        static_cast<std::size_t>(client_fd) >= connections_.size() ||
-        !connections_[client_fd]) {
+        static_cast<std::size_t>(client_fd) >= connections_.size() || !connections_[client_fd]) {
         errno = ENOENT;
         return -1;
     }
@@ -453,7 +513,7 @@ int hpserver::handle_client(int client_fd) {
 
     const auto req = conn.request();
     LOG_DEBUG("HTTP request complete: method={} url={} host={} port={}", req.method, req.url,
-             req.host, req.port);
+              req.host, req.port);
 
     conn.reset_for_next_message();
     proxy_inflight_[client_fd] = true;

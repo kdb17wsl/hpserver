@@ -20,7 +20,11 @@ const int DEFAULT_PORT = 8080;
 
 class hpserver {
 public:
-    hpserver(int port = DEFAULT_PORT) : port(port) {};
+    hpserver(int port = DEFAULT_PORT,
+             unsigned int proxy_workers = 0,
+             unsigned int tunnel_workers = 0,
+             std::size_t proxy_queue_size = 0,
+             std::size_t tunnel_queue_size = 0);
     ~hpserver();
 
     int listen();
@@ -43,7 +47,12 @@ private:
     struct epoll_event events[MAX_EVENTS];
 
     std::vector<std::unique_ptr<http_conn>> connections_;
+    unsigned int proxy_worker_count_ = 0;
+    unsigned int tunnel_worker_count_ = 0;
+    std::size_t proxy_queue_size_ = 0;
+    std::size_t tunnel_queue_size_ = 0;
     thread_pool proxy_pool_;
+    thread_pool tunnel_pool_;
     threadsafe_queue<proxy_done_event> proxy_done_queue_;
     std::vector<bool> proxy_inflight_;
     std::vector<bool> close_after_flush_;
