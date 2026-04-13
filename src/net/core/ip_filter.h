@@ -15,8 +15,6 @@ class ip_filter {
 public:
     explicit ip_filter(size_t bloom_size = 1024);
 
-    ip_filter(std::string ip_list_path, size_t bloom_size = 1024);
-
     /**
      * @brief Add a single IP address to the blacklist.
      */
@@ -32,10 +30,12 @@ public:
      */
     [[nodiscard]] bool is_blocked(uint32_t ip) const noexcept;
 
+    void init(const std::string &ip_list_path = "/config/blocked_ips.txt");
+
 private:
     bitwise_trie<bool> trie_;
     bloom_filter bloom_filter_;
-    std::string ip_list_path_ = "/config/blocked_ips.txt";
+    std::string ip_list_path_;
 
-    void init();
+    
 };

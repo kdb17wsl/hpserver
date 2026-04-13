@@ -5,8 +5,6 @@
 #include <numeric>
 #include <algorithm>
 
-using namespace hpserver::util;
-
 /**
  * @brief 基础功能测试：验证插入、检索与未找到的情况。
  */

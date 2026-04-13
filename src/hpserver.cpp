@@ -83,6 +83,7 @@ void hpserver::refresh_client_timeout(int client_fd) {
 
 void hpserver::init() {
     logger::instance().init();
+    ip_filter_.init();
 
     connections_.resize(MAX_FD);
     proxy_inflight_.assign(MAX_FD, false);

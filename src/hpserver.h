@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "http_conn.h"
+#include "ip_filter.h"
 #include "poller.h"
 #include "socket_ops.h"
 #include "timer.h"
@@ -48,6 +49,8 @@ private:
     std::vector<bool> close_after_flush_;
     int proxy_event_fd_ = -1;
     timer connection_timer_;
+    ip_filter ip_filter_;
+
 
     void init();
     bool set_nonblocking(int fd) const;

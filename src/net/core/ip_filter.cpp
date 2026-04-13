@@ -13,10 +13,6 @@
 ip_filter::ip_filter(size_t bloom_size) 
     : trie_(), bloom_filter_(bloom_size) {}
 
-ip_filter::ip_filter(std::string ip_list_path, size_t bloom_size)
-    : trie_(), bloom_filter_(bloom_size), ip_list_path_(std::move(ip_list_path)) {
-    init();
-}
 
 void ip_filter::add_ip(uint32_t ip) {
     trie_.insert(ip, true);
@@ -62,12 +58,13 @@ bool ip_filter::is_blocked(uint32_t ip) const noexcept {
     return trie_.search(ip).has_value();
 }
 
-void ip_filter::init() {
-    if (ip_list_path_.empty()) return;
+void ip_filter::init(const std::string& ip_list_path) {
+    if (ip_list_path.empty()) return;
+    this->ip_list_path_ = ip_list_path;
 
-    std::ifstream file(ip_list_path_);
+    std::ifstream file(ip_list_path);
     if (!file.is_open()) {
-        std::cerr << "Failed to open IP blacklist file: " << ip_list_path_ << std::endl;
+        std::cerr << "Failed to open IP blacklist file: " << ip_list_path << std::endl;
         return;
     }
 

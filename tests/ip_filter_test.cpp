@@ -47,7 +47,7 @@ TEST_F(IPFilterTest, AddCIDRLargeRange) {
 }
 
 TEST_F(IPFilterTest, LoadFromFile) {
-    std::string test_file = "test_blacklist.txt";
+    std::string test_file = "test_blacklist_tmp.txt";
     {
         std::ofstream ofs(test_file);
         ofs << "# Test Blacklist\n";
@@ -55,13 +55,16 @@ TEST_F(IPFilterTest, LoadFromFile) {
         ofs << "172.16.0.0/24\n";
     }
 
-    ip_filter filter(test_file);
+    ip_filter filter;
+    filter.init(test_file);
 
     EXPECT_TRUE(filter.is_blocked(ip_to_uint("127.0.0.1")));
     EXPECT_TRUE(filter.is_blocked(ip_to_uint("172.16.0.5")));
     EXPECT_FALSE(filter.is_blocked(ip_to_uint("8.8.8.8")));
 
-    std::filesystem::remove(test_file);
+    if (std::filesystem::exists(test_file)) {
+        std::filesystem::remove(test_file);
+    }
 }
 
 TEST_F(IPFilterTest, InvalidCIDR) {

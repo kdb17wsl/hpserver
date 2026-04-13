@@ -2,8 +2,6 @@
 #include "src/util/bloom_filter.h"
 #include <string>
 
-using namespace hpserver::util;
-
 TEST(BloomFilterTest, BasicInsertAndSearch) {
     bloom_filter filter(1024);
     
