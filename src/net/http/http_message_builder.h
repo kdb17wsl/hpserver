@@ -12,6 +12,8 @@ std::string build_plain_text_response(int status_code, std::string_view reason_p
 
 std::string build_service_unavailable_response(std::string_view detail);
 
+std::string build_forbidden_response(std::string_view detail);
+
 std::string build_connect_established_response(std::string_view proxy_agent = "hpserver");
 
 std::string build_forward_proxy_request(const http_request_parser::request_info& req);

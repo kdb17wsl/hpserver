@@ -112,6 +112,15 @@ std::string build_service_unavailable_response(std::string_view detail) {
     return build_plain_text_response(503, "Service Unavailable", message, true);
 }
 
+std::string build_forbidden_response(std::string_view detail) {
+    std::string message = "request forbidden";
+    if (!detail.empty()) {
+        message.append(": ");
+        message.append(detail.data(), detail.size());
+    }
+    return build_plain_text_response(403, "Forbidden", message, true);
+}
+
 std::string build_connect_established_response(std::string_view proxy_agent) {
     const std::string safe_agent = sanitize_header_token(proxy_agent, "hpserver");
 

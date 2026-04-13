@@ -354,6 +354,15 @@ TEST(HttpMessageBuilderTest, BuildsServiceUnavailableResponseWithCloseConnection
     EXPECT_NE(response.find("proxy upstream unavailable: connection refused"), std::string::npos);
 }
 
+TEST(HttpMessageBuilderTest, BuildsForbiddenResponseWithCloseConnection) {
+    const std::string response =
+        http_message_builder::build_forbidden_response("client ip is blocked");
+
+    EXPECT_NE(response.find("HTTP/1.1 403 Forbidden\r\n"), std::string::npos);
+    EXPECT_NE(response.find("Connection: close\r\n"), std::string::npos);
+    EXPECT_NE(response.find("request forbidden: client ip is blocked"), std::string::npos);
+}
+
 TEST(HttpMessageBuilderTest, BuildsPlainTextResponseWithAccurateLength) {
     const std::string response =
         http_message_builder::build_plain_text_response(503, "Service Unavailable", "busy", true);

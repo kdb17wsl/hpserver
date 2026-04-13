@@ -20,6 +20,30 @@ constexpr int kClientIdleTimeoutMs = 15000;
 bool is_expected_connect_shutdown_errno(int err) {
     return err == ECONNRESET || err == EPIPE || err == ENOTCONN || err == ECONNABORTED;
 }
+
+void reject_blacklisted_client(int client_fd) {
+    const std::string response =
+        http_message_builder::build_forbidden_response("client ip is blocked");
+    const char* data = response.data();
+    std::size_t remaining = response.size();
+
+    while (remaining > 0) {
+        const ssize_t n = ::send(client_fd, data, remaining, MSG_NOSIGNAL);
+        if (n > 0) {
+            data += n;
+            remaining -= static_cast<std::size_t>(n);
+            continue;
+        }
+
+        if (n == -1 && errno == EINTR) {
+            continue;
+        }
+
+        break;
+    }
+
+    ::close(client_fd);
+}
 }
 
 hpserver::~hpserver() {
@@ -325,6 +349,14 @@ int hpserver::listen() {
                             break;
                         }
                         break;
+                    }
+
+                    const std::uint32_t client_ip = ntohl(client_addr.sin_addr.s_addr);
+                    if (ip_filter_.is_blocked(client_ip)) {
+                        LOG_WARNING("Blocked connection from blacklisted IP {} (fd={})",
+                                    inet_ntoa(client_addr.sin_addr), client_fd);
+                        reject_blacklisted_client(client_fd);
+                        continue;
                     }
 
                     if (!set_nonblocking(client_fd) || poller_.add(client_fd, kClientEvents)) {
