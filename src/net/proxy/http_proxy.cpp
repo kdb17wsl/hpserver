@@ -20,6 +20,7 @@ namespace {
 constexpr std::size_t kIoBufferSize = 8192;
 constexpr int kMaxPartialReadTimeoutRetries = 5;
 
+// Drain readable data from a non-blocking fd until would-block/eof/error.
 bool append_nonblocking_read(int fd, std::string& out, bool& eof) {
 	char buf[kIoBufferSize];
 	while (true) {
@@ -44,6 +45,7 @@ bool append_nonblocking_read(int fd, std::string& out, bool& eof) {
 	}
 }
 
+// socket_ops overload for the same non-blocking read-drain behavior.
 bool append_nonblocking_read(const socket_ops& sock, std::string& out, bool& eof) {
 	char buf[kIoBufferSize];
 	while (true) {
@@ -68,6 +70,7 @@ bool append_nonblocking_read(const socket_ops& sock, std::string& out, bool& eof
 	}
 }
 
+// Flush buffered data to a non-blocking fd and keep write offset for partial sends.
 bool flush_nonblocking(int fd, std::string& buf, std::size_t& offset) {
 	while (offset < buf.size()) {
 		ssize_t n = ::send(fd, buf.data() + offset, buf.size() - offset, 0);
@@ -90,6 +93,7 @@ bool flush_nonblocking(int fd, std::string& buf, std::size_t& offset) {
 	return true;
 }
 
+// socket_ops overload for buffered non-blocking flush.
 bool flush_nonblocking(const socket_ops& sock, std::string& buf, std::size_t& offset) {
 	while (offset < buf.size()) {
 		ssize_t n = sock.send(buf.data() + offset, buf.size() - offset, 0);
@@ -113,6 +117,7 @@ bool flush_nonblocking(const socket_ops& sock, std::string& buf, std::size_t& of
 }
 
 template <typename WaitFn>
+// Send full payload with EAGAIN/EWOULDBLOCK wait-and-retry semantics.
 bool send_all_nonblocking_socket(const socket_ops& sock, int fd_for_wait, const std::string& data,
 							  WaitFn&& wait_fn) {
 	std::size_t offset = 0;
@@ -140,6 +145,7 @@ bool send_all_nonblocking_socket(const socket_ops& sock, int fd_for_wait, const 
 	return true;
 }
 
+// Lowercase helper used for case-insensitive header key matching.
 std::string to_lower_ascii(std::string_view in) {
 	std::string out(in);
 	for (char& ch : out) {
@@ -148,6 +154,7 @@ std::string to_lower_ascii(std::string_view in) {
 	return out;
 }
 
+// Parse response headers and extract framing metadata for body completeness checks.
 bool parse_response_meta(const std::string& response, std::size_t& header_end,
 					 bool& has_content_length, std::size_t& content_length,
 					 bool& chunked) {
@@ -203,6 +210,7 @@ bool parse_response_meta(const std::string& response, std::size_t& header_end,
 	return true;
 }
 
+// Validate whether a buffered chunked body contains the terminating last chunk.
 bool chunked_body_complete(const std::string& response, std::size_t body_start) {
 	std::size_t pos = body_start;
 	while (true) {
@@ -255,6 +263,7 @@ bool chunked_body_complete(const std::string& response, std::size_t body_start) 
 }
 }
 
+// Block on poll until requested readiness or timeout/error for a single fd.
 bool http_proxy::wait_fd(int fd, std::uint32_t events) {
 	poller io_poller;
 	if (!io_poller.valid()) {
@@ -288,6 +297,7 @@ bool http_proxy::wait_fd(int fd, std::uint32_t events) {
 	return ready_event.events != 0;
 }
 
+// Resolve and connect to upstream with non-blocking connect + SO_ERROR verification.
 bool http_proxy::connect_upstream(const std::string& host, std::uint16_t port,
 								  socket_ops& upstream) {
 	upstream.reset();
@@ -352,6 +362,7 @@ bool http_proxy::connect_upstream(const std::string& host, std::uint16_t port,
 	return connected;
 }
 
+// Forward one HTTP request to upstream and read a complete response with framing-aware stop rules.
 bool http_proxy::forward_request(const http_conn::request_info& req,
 							 std::string& out_response, int* out_errno) {
 	out_response.clear();
@@ -484,6 +495,7 @@ bool http_proxy::forward_request(const http_conn::request_info& req,
 	return false;
 }
 
+// Send all bytes to a plain fd in non-blocking mode, waiting for writable when required.
 bool http_proxy::send_all_nonblocking(int fd, const std::string& data) {
 	std::size_t offset = 0;
 	while (offset < data.size()) {
@@ -510,10 +522,12 @@ bool http_proxy::send_all_nonblocking(int fd, const std::string& data) {
 	return true;
 }
 
+// Build a forward-proxy style upstream request from parsed request metadata.
 std::string http_proxy::build_forward_request(const http_conn::request_info& req) {
 	return http_message_builder::build_forward_proxy_request(req);
 }
 
+// Establish CONNECT tunnel and relay data bidirectionally until both ends close.
 bool http_proxy::forward_connect_tunnel(int client_fd, const http_conn::request_info& req,
 									int* out_errno) {
 	LOG_DEBUG("Establishing CONNECT tunnel for {}:{} on client fd {}", req.host, req.port, client_fd);
