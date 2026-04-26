@@ -19,6 +19,7 @@ function(add_hpserver_gtest target_name source_file)
 endfunction()
 
 add_hpserver_gtest(http_conn_test http_conn_test.cpp hpserver_lib)
+add_hpserver_gtest(http_response_parser_test http_response_parser_test.cpp hpserver_lib)
 add_hpserver_gtest(threadsafe_queue_test threadsafe_queue_test.cpp hpserver_headers)
 add_hpserver_gtest(thread_pool_test thread_pool_test.cpp hpserver_headers)
 add_hpserver_gtest(bloom_filter_test bloom_filter_test.cpp hpserver_headers)
