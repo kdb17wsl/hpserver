@@ -6,6 +6,47 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(HPSERVER_LINK_ROCKSDB_STATIC_DEPS "Link common static dependency libs needed by librocksdb.a" ON)
+
+find_package(Threads REQUIRED)
+find_package(ZLIB REQUIRED)
+find_package(BZip2 REQUIRED)
+
+find_package(RocksDB QUIET CONFIG)
+if(NOT TARGET RocksDB::rocksdb)
+  find_path(ROCKSDB_INCLUDE_DIR rocksdb/db.h)
+  find_library(ROCKSDB_LIBRARY NAMES rocksdb librocksdb.a)
+  if(ROCKSDB_INCLUDE_DIR AND ROCKSDB_LIBRARY)
+    add_library(RocksDB::rocksdb UNKNOWN IMPORTED)
+    set_target_properties(RocksDB::rocksdb PROPERTIES
+      IMPORTED_LOCATION "${ROCKSDB_LIBRARY}"
+      INTERFACE_INCLUDE_DIRECTORIES "${ROCKSDB_INCLUDE_DIR}"
+    )
+  else()
+    message(FATAL_ERROR "RocksDB not found. Install RocksDB (static) or provide CMAKE_PREFIX_PATH/ROCKSDB_INCLUDE_DIR/ROCKSDB_LIBRARY.")
+  endif()
+endif()
+
+add_library(hpserver_rocksdb INTERFACE)
+target_link_libraries(hpserver_rocksdb INTERFACE RocksDB::rocksdb)
+
+if(HPSERVER_LINK_ROCKSDB_STATIC_DEPS)
+  set(ROCKSDB_STATIC_DEPS
+    Threads::Threads
+    ZLIB::ZLIB
+    BZip2::BZip2
+    ${CMAKE_DL_LIBS}
+  )
+
+  foreach(lib_name IN ITEMS snappy lz4 zstd uring)
+    string(TOUPPER "${lib_name}" lib_var)
+    find_library(${lib_var}_LIBRARY NAMES ${lib_name} REQUIRED)
+    list(APPEND ROCKSDB_STATIC_DEPS ${${lib_var}_LIBRARY})
+  endforeach()
+
+  target_link_libraries(hpserver_rocksdb INTERFACE ${ROCKSDB_STATIC_DEPS})
+endif()
+
 add_library(hpserver_headers INTERFACE)
 target_include_directories(hpserver_headers INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -45,11 +86,12 @@ add_library(hpserver_lib STATIC
 target_link_libraries(hpserver_lib
   PUBLIC
     hpserver_headers
+    hpserver_rocksdb
 )
 
-if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    target_compile_definitions(hpserver_lib PUBLIC DISABLE_LOGGING)
-endif()
+target_compile_definitions(hpserver_lib PUBLIC
+  $<$<CONFIG:Release>:DISABLE_LOGGING>
+)
 
 add_executable(hpserver
   src/main.cpp
