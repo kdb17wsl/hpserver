@@ -22,6 +22,7 @@ constexpr unsigned int kFallbackProxyWorkers = 8;
 constexpr unsigned int kFallbackTunnelWorkers = 64;
 constexpr std::size_t kTasksPerProxyWorker = 512;
 constexpr std::size_t kTasksPerTunnelWorker = 128;
+constexpr const char* kCacheDbPath = "/tmp/testdb";
 
 unsigned int default_proxy_worker_count() {
     const unsigned int hw = std::thread::hardware_concurrency();
@@ -170,6 +171,16 @@ void hpserver::init() {
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(port);
+}
+
+bool hpserver::init_cache_db() {
+    if (!cache_.open(kCacheDbPath)) {
+        LOG_ERROR("Failed to initialize cache at '{}'", kCacheDbPath);
+        return false;
+    }
+
+    LOG_INFO("Cache initialized at '{}'", kCacheDbPath);
+    return true;
 }
 
 bool hpserver::init_proxy_async() {
@@ -362,6 +373,10 @@ int hpserver::flush_client_output(int client_fd) {
 
 int hpserver::listen() {
     init();
+
+    if (!init_cache_db()) {
+        return -1;
+    }
 
     if (!set_nonblocking(server_socket.get_fd())) {
         return -1;

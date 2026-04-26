@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "http_conn.h"
+#include "http_cache.h"
 #include "ip_filter.h"
 #include "poller.h"
 #include "socket_ops.h"
@@ -57,11 +58,13 @@ private:
     std::vector<bool> proxy_inflight_;
     std::vector<bool> close_after_flush_;
     int proxy_event_fd_ = -1;
+    http_cache cache_;
     timer connection_timer_;
     ip_filter ip_filter_;
 
 
     void init();
+    bool init_cache_db();
     bool set_nonblocking(int fd) const;
     void close_client(int client_fd);
     int handle_client(int client_fd);

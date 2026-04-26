@@ -75,6 +75,7 @@ add_library(hpserver_lib STATIC
   src/net/core/poller.cpp
   src/net/core/socket_ops.cpp
   src/net/http/http_conn.cpp
+  src/net/http/http_cache.cpp
   src/net/http/http_connection_io.cpp
   src/net/http/http_request_parser.cpp
   src/net/http/http_message_builder.cpp
