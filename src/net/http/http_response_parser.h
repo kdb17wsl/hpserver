@@ -42,6 +42,10 @@ public:
     parse_state state() const { return parse_state_; }
     const std::string& parse_error() const { return parse_error_; }
 
+    // Signal end-of-stream. Needed for responses without Content-Length
+    // (HTTP/1.0 or Connection: close) where the body runs to EOF.
+    bool finish();
+
     void reset_for_next_message();
 
 private:

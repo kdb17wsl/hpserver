@@ -6,12 +6,12 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include <cctype>
 #include <cerrno>
 #include <array>
 #include <cstring>
 
 #include "net/http/http_message_builder.h"
+#include "net/http/http_response_parser.h"
 #include "poller.h"
 #include "socket_ops.h"
 #include "logger/logger.h"
@@ -143,123 +143,6 @@ bool send_all_nonblocking_socket(const socket_ops& sock, int fd_for_wait, const 
 	}
 
 	return true;
-}
-
-// Lowercase helper used for case-insensitive header key matching.
-std::string to_lower_ascii(std::string_view in) {
-	std::string out(in);
-	for (char& ch : out) {
-		ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-	}
-	return out;
-}
-
-// Parse response headers and extract framing metadata for body completeness checks.
-bool parse_response_meta(const std::string& response, std::size_t& header_end,
-					 bool& has_content_length, std::size_t& content_length,
-					 bool& chunked) {
-	header_end = response.find("\r\n\r\n");
-	if (header_end == std::string::npos) {
-		return false;
-	}
-
-	has_content_length = false;
-	content_length = 0;
-	chunked = false;
-
-	const std::string headers = to_lower_ascii(
-		std::string_view(response.data(), header_end + 4));
-
-	std::size_t pos = 0;
-	while (pos < headers.size()) {
-		std::size_t line_end = headers.find("\r\n", pos);
-		if (line_end == std::string::npos) {
-			break;
-		}
-		if (line_end == pos) {
-			break;
-		}
-
-		const std::string_view line(headers.data() + pos, line_end - pos);
-		const std::size_t colon = line.find(':');
-		if (colon != std::string::npos) {
-			std::string_view key = line.substr(0, colon);
-			std::string_view value = line.substr(colon + 1);
-			while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
-				value.remove_prefix(1);
-			}
-
-			if (key == "content-length") {
-				char* end_ptr = nullptr;
-				const unsigned long long parsed =
-					std::strtoull(std::string(value).c_str(), &end_ptr, 10);
-				if (end_ptr != nullptr && end_ptr != std::string(value).c_str()) {
-					has_content_length = true;
-					content_length = static_cast<std::size_t>(parsed);
-				}
-			} else if (key == "transfer-encoding") {
-				if (value.find("chunked") != std::string_view::npos) {
-					chunked = true;
-				}
-			}
-		}
-
-		pos = line_end + 2;
-	}
-
-	return true;
-}
-
-// Validate whether a buffered chunked body contains the terminating last chunk.
-bool chunked_body_complete(const std::string& response, std::size_t body_start) {
-	std::size_t pos = body_start;
-	while (true) {
-		const std::size_t line_end = response.find("\r\n", pos);
-		if (line_end == std::string::npos) {
-			return false;
-		}
-
-		std::string_view size_line(response.data() + pos, line_end - pos);
-		const std::size_t semicolon = size_line.find(';');
-		if (semicolon != std::string_view::npos) {
-			size_line = size_line.substr(0, semicolon);
-		}
-
-		while (!size_line.empty() && (size_line.front() == ' ' || size_line.front() == '\t')) {
-			size_line.remove_prefix(1);
-		}
-		while (!size_line.empty() && (size_line.back() == ' ' || size_line.back() == '\t')) {
-			size_line.remove_suffix(1);
-		}
-		if (size_line.empty()) {
-			return false;
-		}
-
-		char* end_ptr = nullptr;
-		const std::string size_text(size_line);
-		const unsigned long long chunk_size = std::strtoull(size_text.c_str(), &end_ptr, 16);
-		if (end_ptr == nullptr || end_ptr == size_text.c_str() || *end_ptr != '\0') {
-			return false;
-		}
-
-		const std::size_t chunk_data = line_end + 2;
-		if (chunk_size == 0) {
-			if (response.size() >= chunk_data + 2 &&
-				response.compare(chunk_data, 2, "\r\n") == 0) {
-				return true;
-			}
-			return response.find("\r\n\r\n", chunk_data) != std::string::npos;
-		}
-
-		if (response.size() < chunk_data + static_cast<std::size_t>(chunk_size) + 2) {
-			return false;
-		}
-		if (response.compare(chunk_data + static_cast<std::size_t>(chunk_size), 2, "\r\n") != 0) {
-			return false;
-		}
-
-		pos = chunk_data + static_cast<std::size_t>(chunk_size) + 2;
-	}
 }
 }
 
@@ -398,12 +281,7 @@ bool http_proxy::forward_request(const http_conn::request_info& req,
 				LOG_ERROR("Failed to send request to upstream fd {}: {}", upstream_fd, strerror(final_errno));
 			} else {
 				char buf[kIoBufferSize];
-				bool header_parsed = false;
-				std::size_t header_end = 0;
-				bool has_content_length = false;
-				std::size_t content_length = 0;
-				bool is_chunked = false;
-				std::size_t expected_total = 0;
+				http_response_parser response_parser;
 				int partial_read_timeout_retries = 0;
 				while (true) {
 					ssize_t n = upstream.recv(buf, sizeof(buf), 0);
@@ -411,31 +289,24 @@ bool http_proxy::forward_request(const http_conn::request_info& req,
 						out_response.append(buf, static_cast<std::size_t>(n));
 						partial_read_timeout_retries = 0;
 
-						if (!header_parsed) {
-							header_parsed = parse_response_meta(out_response, header_end,
-												has_content_length, content_length, is_chunked);
-							if (header_parsed && has_content_length) {
-								expected_total = header_end + 4 + content_length;
-							}
+						if (!response_parser.parse(std::string_view(buf, static_cast<std::size_t>(n)))) {
+							LOG_ERROR("Failed to parse upstream response on fd {}", upstream_fd);
+							ok = false;
+							final_errno = EPROTO;
+							break;
 						}
-
-						if (header_parsed) {
-							if (has_content_length && out_response.size() >= expected_total) {
-								if (out_response.size() > expected_total) {
-									out_response.resize(expected_total);
-								}
-								break;
-							}
-							if (is_chunked && chunked_body_complete(out_response, header_end + 4)) {
-								break;
-							}
+						if (response_parser.is_message_complete()) {
+							break;
 						}
 						continue;
 					}
 
 					if (n == 0) {
 						LOG_DEBUG("Upstream closed connection (fd: {})", upstream_fd);
-						if (header_parsed && has_content_length && out_response.size() < expected_total) {
+						if (!response_parser.is_message_complete()) {
+							if (response_parser.finish()) {
+								break;
+							}
 							ok = false;
 							final_errno = ECONNRESET;
 						}
@@ -448,14 +319,9 @@ bool http_proxy::forward_request(const http_conn::request_info& req,
 
 					if (errno == EAGAIN || errno == EWOULDBLOCK) {
 						if (!wait_fd(upstream_fd, EPOLLIN)) {
-							const bool has_partial_content_length =
-								header_parsed && has_content_length && out_response.size() > 0 &&
-								out_response.size() < expected_total;
-							const bool has_partial_chunked =
-								header_parsed && is_chunked && out_response.size() > (header_end + 4) &&
-								!chunked_body_complete(out_response, header_end + 4);
 							if (errno == ETIMEDOUT &&
-								(has_partial_content_length || has_partial_chunked) &&
+								out_response.size() > 0 &&
+								!response_parser.is_message_complete() &&
 								partial_read_timeout_retries < kMaxPartialReadTimeoutRetries) {
 								++partial_read_timeout_retries;
 								continue;

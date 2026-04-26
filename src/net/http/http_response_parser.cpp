@@ -13,7 +13,7 @@ http_response_parser* self_from_parser(llhttp_t* parser) {
 http_response_parser::http_response_parser() { init_parser(); }
 
 bool http_response_parser::parse(std::string_view data) {
-    if (has_parse_error() || data.empty()) {
+    if (has_parse_error() || is_message_complete() || data.empty()) {
         return !has_parse_error();
     }
 
@@ -36,6 +36,24 @@ bool http_response_parser::parse(std::string_view data) {
         parse_error_.append(": ");
         parse_error_.append(reason);
     }
+    return false;
+}
+
+bool http_response_parser::finish() {
+    if (has_parse_error() || is_message_complete()) {
+        return !has_parse_error();
+    }
+
+    llhttp_errno_t err = llhttp_finish(&parser_);
+    if (err == HPE_OK || err == HPE_PAUSED) {
+        if (parse_state_ != parse_state::kUpgradedTunnel) {
+            parse_state_ = parse_state::kMessageComplete;
+        }
+        return true;
+    }
+
+    parse_state_ = parse_state::kParseError;
+    parse_error_ = llhttp_errno_name(err);
     return false;
 }
 
