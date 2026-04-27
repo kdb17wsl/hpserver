@@ -11,6 +11,10 @@ option(HPSERVER_LINK_ROCKSDB_STATIC_DEPS "Link common static dependency libs nee
 find_package(Threads REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(BZip2 REQUIRED)
+find_package(Protobuf QUIET CONFIG)
+if(NOT TARGET protobuf::libprotobuf)
+  find_package(Protobuf REQUIRED)
+endif()
 
 find_package(RocksDB QUIET CONFIG)
 if(NOT TARGET RocksDB::rocksdb)
@@ -47,6 +51,16 @@ if(HPSERVER_LINK_ROCKSDB_STATIC_DEPS)
   target_link_libraries(hpserver_rocksdb INTERFACE ${ROCKSDB_STATIC_DEPS})
 endif()
 
+add_library(hpserver_protobuf INTERFACE)
+if(TARGET protobuf::libprotobuf)
+  target_link_libraries(hpserver_protobuf INTERFACE protobuf::libprotobuf)
+elseif(TARGET Protobuf::Protobuf)
+  target_link_libraries(hpserver_protobuf INTERFACE Protobuf::Protobuf)
+else()
+  target_include_directories(hpserver_protobuf INTERFACE ${Protobuf_INCLUDE_DIRS})
+  target_link_libraries(hpserver_protobuf INTERFACE ${Protobuf_LIBRARIES})
+endif()
+
 add_library(hpserver_headers INTERFACE)
 target_include_directories(hpserver_headers INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -78,6 +92,7 @@ add_library(hpserver_lib STATIC
   src/net/http/http_cache.cpp
   src/net/http/http_connection_io.cpp
   src/net/http/http_request_parser.cpp
+  src/net/http/http_response_parser.cpp
   src/net/http/http_message_builder.cpp
   src/net/proxy/http_proxy.cpp
   src/net/core/ip_filter.cpp
@@ -88,6 +103,7 @@ target_link_libraries(hpserver_lib
   PUBLIC
     hpserver_headers
     hpserver_rocksdb
+    hpserver_protobuf
 )
 
 target_compile_definitions(hpserver_lib PUBLIC

@@ -1,12 +1,13 @@
 #pragma once
 
+#include <rocksdb/db.h>
+
 #include <memory>
 #include <string>
 #include <string_view>
 
-#include <rocksdb/db.h>
-
 #include "http_request_parser.h"
+#include "memory_cache.h"
 
 class http_cache {
 public:
@@ -19,7 +20,8 @@ public:
     };
 
     struct lookup_result {
-        lookup_status status = lookup_status::kBypass; // Default to bypass for non-cacheable requests.
+        lookup_status status =
+            lookup_status::kBypass;  // Default to bypass for non-cacheable requests.
         std::string cache_key;
         std::string response;
         std::string detail;
@@ -31,9 +33,13 @@ public:
     lookup_result lookup(const http_request_parser::request_info& req) const;
     bool store(const http_request_parser::request_info& req, std::string_view upstream_response);
 
+    /** @brief Configure L1 memory cache. Disabled by default (0, 0). */
+    void configure_l1(std::size_t max_entries, std::size_t max_bytes);
+
 private:
     static bool is_cacheable_request(const http_request_parser::request_info& req);
     static std::string build_cache_key(const http_request_parser::request_info& req);
 
     std::unique_ptr<rocksdb::DB> db_;
+    mutable memory_cache<std::string, std::string> l1_cache_;
 };
