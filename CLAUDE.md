@@ -53,7 +53,8 @@ Entry point: `src/main.cpp` → `src/hpserver.h/.cpp` (event loop and connection
 | `src/net/http/http_request_parser` | HTTP request parsing (llhttp) |
 | `src/net/http/http_response_parser` | HTTP response parsing (chunked encoding) |
 | `src/net/http/http_message_builder` | Response construction |
-| `src/net/http/http_cache` | RocksDB-backed caching with Protobuf serialization |
+| `src/net/http/http_cache` | L1/L2 cache orchestration with LRU memory cache and persistent layer |
+| `src/net/http/persistent_cache` | RocksDB-backed L2 cache with Protobuf serialization and HTTP cache semantics |
 | `src/net/http/http_connection_io` | I/O read/write paths |
 | `src/net/proxy/http_proxy` | Forward proxy and CONNECT tunnel logic |
 | `src/util/thread_pool` | Bounded thread pool (wait/non-wait stop) |

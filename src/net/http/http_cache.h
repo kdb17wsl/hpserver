@@ -1,13 +1,13 @@
 #pragma once
 
-#include <rocksdb/db.h>
-
 #include <memory>
 #include <string>
 #include <string_view>
 
 #include "http_request_parser.h"
 #include "memory_cache.h"
+
+#include "persistent_cache.h"
 
 class http_cache {
 public:
@@ -28,7 +28,7 @@ public:
     };
 
     bool open(std::string_view db_path);
-    bool ready() const { return db_ != nullptr; }
+    bool ready() const { return l2_ != nullptr && l2_->ready(); }
 
     lookup_result lookup(const http_request_parser::request_info& req) const;
     bool store(const http_request_parser::request_info& req, std::string_view upstream_response);
@@ -40,6 +40,6 @@ private:
     static bool is_cacheable_request(const http_request_parser::request_info& req);
     static std::string build_cache_key(const http_request_parser::request_info& req);
 
-    std::unique_ptr<rocksdb::DB> db_;
+    std::unique_ptr<persistent_cache> l2_;
     mutable memory_cache<std::string, std::string> l1_cache_;
 };

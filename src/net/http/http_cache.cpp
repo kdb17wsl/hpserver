@@ -1,26 +1,17 @@
 #include "http_cache.h"
 
-#include <rocksdb/db.h>
-
 #include <utility>
-
 
 namespace {
 constexpr std::size_t kL1MaxBodySize = 64 * 1024;  // 64KB
-}  // namespace
+}
 
 bool http_cache::open(std::string_view db_path) {
-    rocksdb::Options options;
-    options.create_if_missing = true;
-
-    std::unique_ptr<rocksdb::DB> db;
-    const rocksdb::Status status =
-        rocksdb::DB::Open(options, std::string(db_path), &db);
-    if (!status.ok()) {
+    auto l2 = std::make_unique<persistent_cache>();
+    if (!l2->open(db_path)) {
         return false;
     }
-
-    db_ = std::move(db);
+    l2_ = std::move(l2);
     return true;
 }
 
@@ -56,15 +47,26 @@ http_cache::lookup_result http_cache::lookup(
         return result;
     }
 
-    // L2 lookup (RocksDB).
-    db_->Get(rocksdb::ReadOptions(), result.cache_key, &result.response);
+    // L2 lookup.
+    auto l2_result = l2_->lookup(result.cache_key, req);
+    switch (l2_result.status) {
+    case persistent_cache::lookup_status::kMiss:
+        result.status = lookup_status::kMiss;
+        break;
+    case persistent_cache::lookup_status::kNotModified:
+        result.status = lookup_status::kNotModified;
+        result.response = std::move(l2_result.response);
+        break;
+    case persistent_cache::lookup_status::kHit:
+        result.status = lookup_status::kHit;
+        result.response = std::move(l2_result.response);
+        // Promote to L1 for small objects.
+        if (result.response.size() <= kL1MaxBodySize) {
+            l1_cache_.put(result.cache_key, result.response);
+        }
+        break;
+    }
 
-    // Framework placeholder:
-    // 1) Read entry from RocksDB by cache_key.
-    // 2) Evaluate If-Modified-Since against cached Last-Modified.
-    // 3) Return kNotModified/kHit/kMiss accordingly.
-    // TODO: On L2 hit, promote to L1 via l1_cache_.put().
-    result.status = lookup_status::kMiss;
     return result;
 }
 
@@ -76,14 +78,15 @@ bool http_cache::store(const http_request_parser::request_info& req,
 
     const std::string cache_key = build_cache_key(req);
 
+    if (!l2_->store(cache_key, upstream_response)) {
+        return false;
+    }
+
     // Write to L1 only for small objects; skip large files.
     if (upstream_response.size() <= kL1MaxBodySize) {
         l1_cache_.put(cache_key, std::string(upstream_response));
     }
 
-    // Framework placeholder:
-    // 1) Parse upstream response headers.
-    // 2) Persist payload + metadata (e.g. Last-Modified) to RocksDB.
     return true;
 }
 
