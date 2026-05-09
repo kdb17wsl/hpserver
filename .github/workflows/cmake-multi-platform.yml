@@ -36,6 +36,19 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Install Linux dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          libbz2-dev \
+          libsnappy-dev \
+          liblz4-dev \
+          libzstd-dev \
+          liburing-dev \
+          libprotobuf-dev \
+          protobuf-compiler \
+          librocksdb-dev
+
     - name: Set reusable strings
       # Turn repeated input strings (such as the build output directory) into step outputs. These step outputs can be used throughout the workflow file.
       id: strings
