@@ -74,7 +74,7 @@ private:
     const size_t capacity_;
     std::vector<T> data_;
 
-#ifdef __cpp_lib_atomic_wait
+#ifdef __cpp_lib_hardware_interference_size
     static constexpr size_t cache_line_size = std::hardware_destructive_interference_size;
 #else
     static constexpr size_t cache_line_size = 64;
